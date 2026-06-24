@@ -3,11 +3,13 @@
  */
 import type { Context, NextFunction } from 'grammy';
 import config from './config';
+import { getRedisClient } from './storage';
 
 /**
- * Rate limit tracking per user
+ * Rate limit tracking per user (capped to prevent unbounded growth)
  */
 const rateLimitMap = new Map<number, { count: number; resetAt: number }>();
+const RATE_LIMIT_MAP_CAP = 10_000;
 
 /**
  * Metrics counters
@@ -38,6 +40,10 @@ export function rateLimitMiddleware<C extends Context>() {
         let userData = rateLimitMap.get(userId);
 
         if (!userData || now > userData.resetAt) {
+            // Skip tracking if map is at capacity (still allow the request)
+            if (rateLimitMap.size >= RATE_LIMIT_MAP_CAP && !rateLimitMap.has(userId)) {
+                return next();
+            }
             userData = { count: 1, resetAt: now + windowMs };
             rateLimitMap.set(userId, userData);
         } else {
@@ -71,8 +77,11 @@ export function metricsMiddleware<C extends Context>() {
             : '';
 
         if (command.startsWith('/')) {
-            const cmd = command.slice(1).toLowerCase();
-            metrics.commandCounts.set(cmd, (metrics.commandCounts.get(cmd) || 0) + 1);
+            const cmd = command.slice(1).toLowerCase().split('@')[0] || '';
+            // Only track if already known or under cap (prevents unbounded growth)
+            if (metrics.commandCounts.has(cmd) || metrics.commandCounts.size < 100) {
+                metrics.commandCounts.set(cmd, (metrics.commandCounts.get(cmd) || 0) + 1);
+            }
         }
 
         try {
@@ -117,6 +126,60 @@ export function cleanupRateLimits(): void {
             rateLimitMap.delete(userId);
         }
     }
+}
+
+/**
+ * Auto-register middleware for backfilling existing users.
+ * If the session has an ASN (user is logged in) but hasn't been registered
+ * to the DB yet in this session, silently call the API to persist the mapping.
+ */
+export function autoRegisterMiddleware<C extends Context & { session: { asn?: number; _registered?: boolean } }>(apiUrl: string, apiToken: string) {
+    return async (ctx: C, next: NextFunction) => {
+        // Only run if user is logged in and not yet registered in this session
+        if (ctx.session.asn && !ctx.session._registered && ctx.from?.id) {
+            // Fire-and-forget: don't block the command handler
+            const asn = ctx.session.asn;
+            const telegramId = ctx.from.id;
+            fetch(`${apiUrl}/admin`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiToken}`,
+                },
+                body: JSON.stringify({
+                    action: 'registerTelegramId',
+                    asn,
+                    telegramId,
+                }),
+            }).then(() => {
+                ctx.session._registered = true;
+            }).catch((error) => {
+                console.error('[AutoRegister] Failed to register telegramId:', error);
+            });
+        }
+
+        return next();
+    };
+}
+
+/**
+ * Username→ID cache middleware.
+ * Stores every interacting user's @username→numeric_id mapping in Redis
+ * so the notification system can resolve @username contacts to chat IDs.
+ */
+export function usernameCacheMiddleware<C extends Context>() {
+    return async (ctx: C, next: NextFunction) => {
+        const user = ctx.from;
+        if (user?.username && user.id) {
+            const redis = getRedisClient();
+            if (redis) {
+                // Fire-and-forget: cache username→id with 90-day TTL
+                const key = `tg:username:${user.username.toLowerCase()}`;
+                redis.set(key, String(user.id), 'EX', 86400 * 90).catch(() => {});
+            }
+        }
+        return next();
+    };
 }
 
 // Cleanup every 5 minutes

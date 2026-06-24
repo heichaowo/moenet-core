@@ -8,6 +8,9 @@
   "scripts": {
     "dev:api": "bun run --filter @moenet/api dev",
     "dev:web": "bun run --filter @moenet/web dev",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
     "build": "bun run --filter '*' build",
     "lint": "bun run --filter '*' lint",
     "test": "bun run --filter '*' test"

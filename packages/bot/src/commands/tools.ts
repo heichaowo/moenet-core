@@ -3,6 +3,8 @@ import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
+import { lookupWhois, formatWhoisResult, getWhoisAttr, fetchContacts } from '../services/dn42Registry';
+import { normalizeAsn, isAsnInput } from './peer/validators';
 
 /**
  * Execute tool on agent node(s)
@@ -21,19 +23,23 @@ async function executeOnAgent(
         return await runLocalCommand(command, target);
     }
 
-    const results: string[] = [];
+    // Run requests in parallel with per-request timeout to avoid webhook timeout
+    const PER_REQUEST_TIMEOUT = 15_000; // 15s per agent request
+    const OVERALL_TIMEOUT = 25_000; // 25s overall to stay within Telegram webhook limits
 
-    for (const id of nodeIds) {
+    const promises = nodeIds.map(async (id): Promise<string | null> => {
         const node = nodes.get(id);
-        if (!node) continue;
+        if (!node) return null;
 
         const endpoint = await getAgentEndpoint(id);
         if (!endpoint) {
-            results.push(`❌ ${id}: No agent endpoint`);
-            continue;
+            return `❌ ${id}: No agent endpoint`;
         }
 
         try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), PER_REQUEST_TIMEOUT);
+
             const response = await fetch(`${endpoint}/${command}`, {
                 method: 'POST',
                 headers: {
@@ -41,17 +47,41 @@ async function executeOnAgent(
                     'Authorization': `Bearer ${config.agentToken || ''}`,
                 },
                 body: JSON.stringify({ target }),
+                signal: controller.signal,
             });
+
+            clearTimeout(timeout);
 
             if (response.ok) {
                 const data = await response.json() as { result?: string };
                 const nodeName = node.location || id;
-                results.push(`📍 *${nodeName}*\n\`\`\`\n${data.result || 'No output'}\n\`\`\``);
+                return `📍 *${nodeName}*\n\`\`\`\n${data.result || 'No output'}\n\`\`\``;
             } else {
-                results.push(`❌ ${id}: HTTP ${response.status}`);
+                return `❌ ${id}: HTTP ${response.status}`;
             }
         } catch (error) {
-            results.push(`❌ ${id}: ${(error as Error).message.slice(0, 50)}`);
+            const msg = (error as Error).name === 'AbortError'
+                ? 'Request timed out'
+                : (error as Error).message.slice(0, 50);
+            return `❌ ${id}: ${msg}`;
+        }
+    });
+
+    // Race all requests against the overall timeout
+    const settled = await Promise.race([
+        Promise.allSettled(promises),
+        new Promise<PromiseSettledResult<string | null>[]>((resolve) =>
+            setTimeout(() => resolve(promises.map(() => ({
+                status: 'rejected' as const,
+                reason: new Error('Overall timeout'),
+            }))), OVERALL_TIMEOUT)
+        ),
+    ]);
+
+    const results: string[] = [];
+    for (const result of settled) {
+        if (result.status === 'fulfilled' && result.value) {
+            results.push(result.value);
         }
     }
 
@@ -62,11 +92,7 @@ async function executeOnAgent(
  * Run command locally (fallback)
  */
 async function runLocalCommand(command: string, target: string): Promise<string> {
-    const { exec } = await import('child_process');
-    const { promisify } = await import('util');
-    const execAsync = promisify(exec);
-
-    // Security: Validate target to prevent command injection
+    // Security: Validate target to prevent injection
     if (/[;&|`$(){}[\]<>\\"']/.test(target)) {
         return 'Invalid target: contains forbidden characters';
     }
@@ -88,28 +114,56 @@ async function runLocalCommand(command: string, target: string): Promise<string>
     const args = cmdMap[command];
     if (!args) return 'Unknown command';
 
-    try {
-        // Use spawn-style exec with args array to avoid shell injection
-        const cmdStr = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-        const { stdout, stderr } = await execAsync(cmdStr, { timeout: 30000, shell: '/bin/sh' });
+    // Use Bun.spawn (no shell) — consistent with runSpawnCommand
+    const result = await runSpawnCommand(args, 30000);
 
-        // For path command, filter output
-        if (command === 'path') {
-            const lines = (stdout || stderr || '').split('\n');
-            const filtered = lines.filter(line =>
-                line.includes('BGP.as_path') || line.includes('via')
-            );
-            return filtered.join('\n') || 'No AS path found';
-        }
+    // For path command, filter output
+    if (command === 'path') {
+        const lines = result.split('\n');
+        const filtered = lines.filter(line =>
+            line.includes('BGP.as_path') || line.includes('via')
+        );
+        return filtered.join('\n') || 'No AS path found';
+    }
+
+    return result;
+}
+
+/**
+ * Run a command with explicit args array using Bun.spawn (no shell interpretation).
+ * Used for whois/dig which need multi-argument invocations.
+ */
+async function runSpawnCommand(args: string[], timeoutMs = 10000): Promise<string> {
+    try {
+        const proc = Bun.spawn(args, {
+            stdout: 'pipe',
+            stderr: 'pipe',
+        });
+
+        const timeout = setTimeout(() => proc.kill(), timeoutMs);
+
+        // Read stdout and stderr in parallel to avoid deadlock
+        const [stdout, stderr] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+        ]);
+
+        clearTimeout(timeout);
+        await proc.exited; // Prevent zombie processes
 
         return stdout || stderr || 'No output';
     } catch (error) {
-        const execError = error as Error & { killed?: boolean };
-        if (execError.killed) {
-            return 'Command timed out';
-        }
-        return `Error: ${execError.message}`;
+        return `Error: ${(error as Error).message}`;
     }
+}
+
+/**
+ * Validate user-supplied argument to prevent flag injection.
+ * Rejects args starting with '-' that could pass flags to whois/dig.
+ */
+function sanitizeCommandArg(arg: string): string | null {
+    if (!arg || arg.startsWith('-')) return null;
+    return arg;
 }
 
 /**
@@ -119,15 +173,19 @@ async function buildNodeKeyboard(command: string, target: string, currentNode = 
     const keyboard = new InlineKeyboard();
     const nodes = await getNodes();
 
-    // All button
-    const allLabel = currentNode === 'all' ? '✅ 全部' : '全部';
-    keyboard.text(allLabel, `tool:${command}:${target}:all`);
+    // Hide 'All' button for trace and lg (too slow/verbose for all nodes)
+    const hideAll = command === 'trace' || command === 'lg';
+    if (!hideAll) {
+        const allLabel = currentNode === 'all' ? '✅ 全部' : '全部';
+        keyboard.text(allLabel, `tool:${command}:${target}:all`);
+    }
 
-    // Node buttons
-    let count = 1;
-    for (const [nodeId, node] of nodes) {
-        const name = node.location || nodeId;
-        const label = currentNode === nodeId ? `✅ ${name}` : name;
+    // Node buttons - sorted alphabetically by nodeId for consistent ordering
+    const sortedEntries = Array.from(nodes.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    let count = hideAll ? 0 : 1;
+    for (const [nodeId, node] of sortedEntries) {
+        const displayName = node.location ? `${nodeId} ${node.location}` : nodeId;
+        const label = currentNode === nodeId ? `✅ ${displayName}` : displayName;
         keyboard.text(label, `tool:${command}:${target}:${nodeId}`);
 
         count++;
@@ -147,9 +205,33 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
         if (!command || !target || !node) return;
 
-        await ctx.answerCallbackQuery('Executing...');
+        await ctx.answerCallbackQuery();
 
-        const result = await executeOnAgent(command, target, node);
+        // Show loading indicator immediately so user knows the click registered
+        const nodes = await getNodes();
+        const nodeInfo = nodes.get(node);
+        const nodeName = nodeInfo ? `${node} ${nodeInfo.location}` : node;
+        const loadingText = node === 'all'
+            ? `⏳ Running ${command} to \`${target}\` on all nodes...`
+            : `⏳ Running ${command} to \`${target}\` on *${nodeName}*...`;
+
+        try {
+            await ctx.editMessageText(loadingText, { parse_mode: 'Markdown' });
+        } catch { /* ignore edit errors */ }
+
+        let result: string;
+        if (command === 'lg') {
+            // LG = combined route + path
+            const [routeResult, pathResult] = await Promise.all([
+                executeOnAgent('route', target, node),
+                executeOnAgent('path', target, node),
+            ]);
+            result = `🔍 *Looking Glass: \`${target}\`*\n\n` +
+                `📡 *Route Info:*\n${routeResult}\n\n` +
+                `🛤 *AS Path:*\n${pathResult}`;
+        } else {
+            result = await executeOnAgent(command, target, node);
+        }
         const keyboard = await buildNodeKeyboard(command, target, node);
 
         await ctx.editMessageText(result.slice(0, 4000), {
@@ -198,15 +280,19 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
             return;
         }
 
+        if (!/^[\w.-]+$/.test(target)) {
+            await ctx.reply('❌ Invalid target');
+            return;
+        }
+
         const targetWithPort = `${target}:${port}`;
         const keyboard = await buildNodeKeyboard('tcping', targetWithPort, 'all');
+        const result = await executeOnAgent('tcping', targetWithPort, 'all');
 
-        await ctx.reply(`🔌 TCPing ${target}:${port}...`, {
+        await ctx.reply(result.slice(0, 4000), {
+            parse_mode: 'Markdown',
             reply_markup: keyboard,
         });
-
-        const result = await executeOnAgent('tcping', targetWithPort, 'all');
-        await ctx.reply(result.slice(0, 4000), { parse_mode: 'Markdown' });
     });
 
     /**
@@ -215,7 +301,7 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
     bot.command('trace', async (ctx) => {
         const args = ctx.match?.trim().split(/\s+/) || [];
         const target = args[0];
-        const node = args[1] || 'all';
+        const node = args[1];
 
         if (!target) {
             await ctx.reply('用法: /trace <IP/域名> [节点]');
@@ -224,6 +310,17 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
         if (!/^[\w.-]+$/.test(target)) {
             await ctx.reply('❌ Invalid target');
+            return;
+        }
+
+        if (!node) {
+            // Show node selection keyboard first to avoid running traceroute on all nodes
+            // (which would exceed Telegram's webhook timeout)
+            const keyboard = await buildNodeKeyboard('trace', target);
+            await ctx.reply(`🔍 Select a node to trace route to \`${target}\`:`, {
+                parse_mode: 'Markdown',
+                reply_markup: keyboard,
+            });
             return;
         }
 
@@ -251,10 +348,61 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
             return;
         }
 
+        if (!/^[\w.:/-]+$/.test(target)) {
+            await ctx.reply('❌ Invalid target');
+            return;
+        }
+
         const keyboard = await buildNodeKeyboard('route', target, node);
         const result = await executeOnAgent('route', target, node);
 
         await ctx.reply(result.slice(0, 4000), {
+            parse_mode: 'Markdown',
+            reply_markup: keyboard,
+        });
+    });
+
+    /**
+     * /lg <target> - Looking glass (combined route + AS path on single node)
+     */
+    bot.command('lg', async (ctx) => {
+        const args = ctx.match?.trim().split(/\s+/) || [];
+        const target = args[0];
+        const node = args[1];
+
+        if (!target) {
+            await ctx.reply('用法: /lg <IP/CIDR> [节点]\n例如: /lg 172.22.188.0/27\n\n综合查询：路由 + AS 路径');
+            return;
+        }
+
+        if (!/^[\w.:/-]+$/.test(target)) {
+            await ctx.reply('❌ Invalid target');
+            return;
+        }
+
+        if (!node) {
+            // Show node selection first (lg is too heavy for all nodes)
+            const keyboard = await buildNodeKeyboard('lg', target);
+            await ctx.reply(`🔍 Select a node to query \`${target}\`:`, {
+                parse_mode: 'Markdown',
+                reply_markup: keyboard,
+            });
+            return;
+        }
+
+        // Run route and path queries in parallel on the selected node
+        const [routeResult, pathResult] = await Promise.all([
+            executeOnAgent('route', target, node),
+            executeOnAgent('path', target, node),
+        ]);
+
+        const combined = `🔍 *Looking Glass: \`${target}\`*\n\n` +
+            `📡 *Route Info:*\n${routeResult}\n\n` +
+            `🛤 *AS Path:*\n${pathResult}`;
+
+        const keyboard = await buildNodeKeyboard('lg', target, node);
+
+        await ctx.reply(combined.slice(0, 4000), {
             parse_mode: 'Markdown',
             reply_markup: keyboard,
         });
@@ -270,6 +418,11 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
         if (!target) {
             await ctx.reply('用法: /path <IP/CIDR> [节点]');
+            return;
+        }
+
+        if (!/^[\w.:/-]+$/.test(target)) {
+            await ctx.reply('❌ Invalid target');
             return;
         }
 
@@ -289,7 +442,7 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
         const query = ctx.match?.trim();
 
         if (!query) {
-            await ctx.reply('用法: /whois <ASN/IP/name>\n例如: /whois AS4242420998');
+            await ctx.reply('用法: /whois <ASN/IP/name>\n例如: /whois 998, AS4242420998, 172.23.0.80');
             return;
         }
 
@@ -306,9 +459,16 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
                 await ctx.reply(`❌ 未找到: ${query}`);
             }
         } catch {
-            // Fallback to local whois
-            const server = query.toUpperCase().startsWith('AS') ? '-h whois.dn42' : '';
-            const result = await runLocalCommand('whois', `${server} ${query}`);
+            // Fallback to local whois using spawn (avoids runLocalCommand validation issues)
+            const safeQuery = sanitizeCommandArg(query);
+            if (!safeQuery) {
+                await ctx.reply('❌ 无效查询（不允许 - 开头的参数）');
+                return;
+            }
+            const args = safeQuery.toUpperCase().startsWith('AS')
+                ? ['whois', '-h', 'whois.dn42', safeQuery]
+                : ['whois', safeQuery];
+            const result = await runSpawnCommand(args);
             await ctx.reply(`\`\`\`\n${result.slice(0, 4000)}\n\`\`\``, { parse_mode: 'Markdown' });
         }
     });
@@ -318,11 +478,11 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
      */
     bot.command('dig', async (ctx) => {
         const args = ctx.match?.trim().split(/\s+/) || [];
-        const domain = args[0];
+        const domain = sanitizeCommandArg(args[0] || '');
         const recordType = args[1]?.toUpperCase() || 'A';
 
         if (!domain) {
-            await ctx.reply('用法: /dig <域名> [类型]\n例如: /dig moenet.dn42 AAAA');
+            await ctx.reply('用法: /dig <域名> [类型]\n例如: /dig moenet.dn42 AAAA\n（不允许 - 开头的参数）');
             return;
         }
 
@@ -332,8 +492,8 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        // Query DN42 DNS
-        const result = await runLocalCommand('dig', `@172.20.0.53 ${domain} ${recordType} +short`);
+        // Query DN42 DNS using spawn (runLocalCommand rejects multi-arg targets)
+        const result = await runSpawnCommand(['dig', '@172.20.0.53', domain, recordType, '+short']);
 
         await ctx.reply(
             `🔍 *DNS Query*\n\n` +
@@ -349,129 +509,49 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
      * /findnoc <ASN> - Find NOC contacts using Burble REST API
      */
     bot.command('findnoc', async (ctx) => {
-        const query = ctx.match?.trim().replace(/^AS/i, '');
+        const query = ctx.match?.trim();
 
-        if (!query || !/^\d+$/.test(query)) {
-            await ctx.reply('用法: /findnoc <ASN>\n例如: /findnoc 4242420998');
+        if (!query || !isAsnInput(query)) {
+            await ctx.reply('用法: /findnoc <ASN>\n例如: /findnoc 998, 0998, AS4242420998');
             return;
         }
 
+        const asn = normalizeAsn(query);
+
         try {
-            // Get ASN info from Burble API
-            const asnData = await lookupWhois(`AS${query}`);
-            if (!asnData) {
-                await ctx.reply(`❌ ASN not found 未找到: AS${query}`);
-                return;
-            }
-
-            // Extract admin-c reference
-            const adminC = getWhoisAttr(asnData, 'admin-c');
-            if (!adminC) {
-                await ctx.reply(`ℹ️ No admin-c found for AS${query}\nTry /whois AS${query} for full record`);
-                return;
-            }
-
-            // Extract handle from markdown link "[NAME](person/NAME)"
-            let handle = adminC;
-            const match = adminC.match(/\[([^\]]+)\]/);
-            if (match && match[1]) handle = match[1];
-
-            // Get person record
-            const personData = await lookupWhois(handle);
-            if (!personData) {
-                await ctx.reply(`ℹ️ Person record not found: ${handle}\nTry /whois AS${query} for full record`);
-                return;
-            }
-
-            // Collect contact fields
-            const contacts: string[] = [];
-            const contactFields = ['person', 'e-mail', 'contact', 'remarks'];
-            for (const field of contactFields) {
-                const value = getWhoisAttr(personData, field);
-                if (value) contacts.push(`${field}: ${value}`);
-            }
+            // Use shared fetchContacts which handles all admin-c entries
+            const contacts = await fetchContacts(asn);
 
             if (contacts.length > 0) {
                 await ctx.reply(
-                    `📞 *NOC Contacts for AS${query}*\n\n\`\`\`\n${contacts.join('\n')}\n\`\`\``,
+                    `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${contacts.join('\n')}\n\`\`\``,
                     { parse_mode: 'Markdown' }
                 );
             } else {
-                await ctx.reply(
-                    `ℹ️ No contact info found 未找到联系信息\n` +
-                    `Try /whois AS${query} for full record\n` +
-                    `尝试 /whois AS${query} 查看完整记录`
-                );
-            }
-        } catch {
-            // Fallback to local whois
-            const result = await runLocalCommand('whois', `-h whois.dn42 AS${query}`);
-            const lines = result.split('\n');
-            const contacts: string[] = [];
-            for (const line of lines) {
-                if (line.match(/^(admin-c|tech-c|e-mail|contact|person):/i)) {
-                    contacts.push(line.trim());
+                // Fallback to local whois
+                const result = await runSpawnCommand(['whois', '-h', 'whois.dn42', `AS${asn}`]);
+                const lines = result.split('\n');
+                const localContacts: string[] = [];
+                for (const line of lines) {
+                    if (line.match(/^(admin-c|tech-c|e-mail|contact|person):/i)) {
+                        localContacts.push(line.trim());
+                    }
+                }
+                if (localContacts.length > 0) {
+                    await ctx.reply(
+                        `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${localContacts.join('\n')}\n\`\`\``,
+                        { parse_mode: 'Markdown' }
+                    );
+                } else {
+                    await ctx.reply(
+                        `ℹ️ No contact info found 未找到联系信息\n` +
+                        `Try /whois AS${asn} for full record\n` +
+                        `尝试 /whois AS${asn} 查看完整记录`
+                    );
                 }
             }
-            if (contacts.length > 0) {
-                await ctx.reply(
-                    `📞 *NOC Contacts for AS${query}*\n\n\`\`\`\n${contacts.join('\n')}\n\`\`\``,
-                    { parse_mode: 'Markdown' }
-                );
-            } else {
-                await ctx.reply(`ℹ️ No contact info found for AS${query}\nTry /whois AS${query}`);
-            }
+        } catch {
+            await ctx.reply(`❌ Failed to lookup AS${asn}`);
         }
     });
-}
-
-/**
- * Lookup WHOIS using Burble REST API
- */
-async function lookupWhois(query: string): Promise<WhoisResult | null> {
-    const baseUrl = 'https://explorer.burble.com/api/registry';
-
-    // Detect object type
-    const q = query.toUpperCase();
-    let objectType = 'mntner';
-    if (q.startsWith('AS') && /^\d+$/.test(q.substring(2))) objectType = 'aut-num';
-    else if (q.endsWith('-MNT')) objectType = 'mntner';
-    else if (q.endsWith('-DN42')) objectType = 'person';
-    else if (q.includes('/')) objectType = q.includes(':') ? 'route6' : 'route';
-    else if (q.includes(':')) objectType = 'inet6num';
-    else if (/^\d+\.\d+\.\d+\.\d+/.test(q)) objectType = 'inetnum';
-
-    const objectKey = objectType === 'aut-num' ? query.toUpperCase() : query;
-
-    try {
-        const response = await fetch(`${baseUrl}/${objectType}/${objectKey}`);
-        if (!response.ok) return null;
-
-        const data = await response.json() as Record<string, WhoisResult>;
-        const key = `${objectType}/${objectKey}`;
-        return data[key] || null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Format WHOIS result as text
- */
-function formatWhoisResult(data: WhoisResult): string {
-    if (!data.Attributes) return 'No data';
-    return data.Attributes.map(([key, value]) => `${key}: ${value}`).join('\n');
-}
-
-/**
- * Get single attribute from WHOIS result
- */
-function getWhoisAttr(data: WhoisResult, key: string): string | undefined {
-    const attr = data.Attributes?.find(a => a[0] === key);
-    return attr ? attr[1] : undefined;
-}
-
-interface WhoisResult {
-    Attributes: [string, string][];
-    Backlinks?: string[];
 }

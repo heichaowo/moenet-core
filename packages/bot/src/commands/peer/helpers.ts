@@ -59,11 +59,11 @@ export function getFlowWithCurrent(ctx: BotContext): {
 }
 
 /**
- * Guard: Check if peerFlow exists with routerUuid
+ * Guard: Check if peerFlow exists with sessionUuid
  */
-export function getFlowWithRouter(ctx: BotContext): NonNullable<BotContext['session']['peerFlow']> | undefined {
+export function getFlowWithSession(ctx: BotContext): NonNullable<BotContext['session']['peerFlow']> | undefined {
     const flow = ctx.session.peerFlow;
-    if (!flow || !flow.routerUuid) {
+    if (!flow || !flow.sessionUuid) {
         return undefined;
     }
     return flow;

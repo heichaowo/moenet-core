@@ -45,78 +45,58 @@ export function bi(msg: BilingualMessage): string {
 // Start / Help
 // ==============================================================================
 
-export const START_WELCOME = `Hello, I'm Dorothy for MoeNet-DN42 (AS4242420998).
-你好，我是 MoeNet-DN42 (AS4242420998) 的 桃乐丝。
+export const START_WELCOME = `🌐 *MoeNet\\-DN42* \\(AS4242420998\\)
 
-For more information, please check: 更多信息请查看：
-https://dn42.asn.moe/
+Hello\\! I'm *Dorothy* 桃乐丝, your peering assistant\\.
+你好！我是你的 Peering 助手。
 
-The command list is in the next message.
-指令列表在下一条消息中。
+📖 [Website 官网](https://dn42.asn.moe/)  ·  🐙 [GitHub](https://github.com/heichaowo/moenet-core)
 
-You can always use /cancel to interrupt current operation.
-你始终可以使用 /cancel 终止当前正在进行的操作。
+━━━━━━━━━━━━━━━━
+💡 *Support 支持*
 
-When something unexpected happens or the bot can't meet your needs, please contact @HeiCha
-当出现了什么意料之外的，或者机器人无法满足你的需求，请联系 @HeiCha`;
+🔧 Peering issues → Contact @HeiCha
+连接问题请联系 @HeiCha
 
-export const START_COMMANDS = `Command List 指令列表
+🐛 Bug reports & feature requests → [GitHub Issues](https://github.com/heichaowo/moenet-core/issues)
+Bug 反馈 & 功能建议请提 Issue`;
 
-\`\`\`
-Commands
-Tools:
-- /ping [ip/domain]
-- /tcping [ip/domain] {port}
-- /trace [ip/domain]
-- /route [ip/domain]
-- /path [ip/domain]
-- /whois [something]
-- /dig [domain] {type}
-- /findnoc [asn]
-User Manage:
-- /login
-Login to verify your ASN
-登录以验证你的 ASN
-- /logout
-Logout current logged ASN
-退出当前登录的 ASN
-- /whoami
-Get current login user
-获取当前登录用户
-Peer:
-- /peer
-Set up a peer
-设置一个 Peer
-- /modify
-Modify peer information
-修改 Peer 信息
-- /remove
-Remove a peer
-移除一个 Peer
-- /info
-Show your peer info and status
-查看你的 Peer 信息及状态
-- /restart
-Restart tunnel and Bird session
-重启隧道及 Bird 会话
-Statistics:
-- /rank
-Show DN42 global ranking
-显示 DN42 总体排名
-- /stats [asn]
-Show DN42 user basic info & statistics
-显示 DN42 用户基本信息及数据
-- /peerlist [asn]
-Show the peer situation of a user
-显示某 DN42 用户的 Peer 情况
-Community:
-- /community
-Show BGP community statistics
-显示 BGP Community 统计
-- /latency [asn]
-Show peer latency probe results
-显示 Peer 延迟探测结果
-\`\`\``;
+export const START_COMMANDS = `📋 *Commands 指令列表*
+
+━━━━━━━━━━━━━━━━
+🔑 *Account 账户*
+/login — Login with ASN 登录
+/logout — Logout 登出
+/whoami — Current session 当前登录
+
+━━━━━━━━━━━━━━━━
+🔗 *Peering 连接*
+/peer — Create new peer 建立连接
+/modify — Modify peer 修改连接
+/remove — Remove peer 删除连接
+/info — Peer info & status 连接状态
+/status — WG/BGP live status 实时状态
+/restart — Restart tunnel 重启隧道
+
+━━━━━━━━━━━━━━━━
+🛠️ *Tools 工具*
+/ping — Ping test 网络测试
+/tcping — TCP ping test TCP 测试
+/trace — Traceroute 路由追踪
+/route — Route lookup 路由查询
+/path — AS path query AS 路径
+/whois — WHOIS lookup 信息查询
+/dig — DNS lookup DNS 查询
+/findnoc — NOC contacts 查联系方式
+
+━━━━━━━━━━━━━━━━
+📊 *Statistics 统计*
+/rank — Global ranking 排行榜
+/stats — User statistics 用户统计
+/peerlist — Peer list 连接列表
+/community — BGP communities 社区标记
+/latency — Latency probe 延迟探测
+/flaps — Route flap history 路由抖动`;
 
 // ==============================================================================
 // Login
@@ -125,14 +105,14 @@ Show peer latency probe results
 export const LOGIN_ASK_ASN = `Enter your ASN
 请输入你的 ASN`;
 
-export const LOGIN_CHOOSE_METHOD = `Choose authentication method. Use /cancel to interrupt.
-选择验证方式。使用 /cancel 终止操作。`;
+export const LOGIN_CHOOSE_METHOD = `Choose authentication method.
+选择验证方式。`;
 
 export const LOGIN_EMAIL_SENT = `✉️ Verification code has been sent to your email.
 验证码已发送至您的邮箱。
 
-Please contact @HeiCha if you can not receive it.
-如果无法收到请联系 @HeiCha
+Not received? Contact @HeiCha for help.
+没收到？请联系 @HeiCha
 
 Enter your verification code:
 请输入验证码：`;

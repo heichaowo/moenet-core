@@ -1,15 +1,14 @@
 /**
  * Peer Creation Flow Handlers
  * 
- * Handles all callbacks for the peer creation wizard flow.
+ * Handles InlineKeyboard callbacks that supplement the primary ReplyKeyboard wizard flow.
+ * The main wizard uses ReplyKeyboard (text handlers in peer.ts), while these callbacks
+ * handle quick-select options and legacy compatibility.
  */
 
 import type { Bot } from 'grammy';
-import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../../../index';
-import { calculatePort } from '../validators';
 import {
-    showServerWgInfo,
     promptEndpoint,
     promptPubkey,
     promptPsk,
@@ -17,146 +16,60 @@ import {
 } from '../ui';
 
 /**
- * Register all creation flow callback handlers
+ * Register creation flow InlineKeyboard callback handlers.
+ * 
+ * NOTE: Primary wizard flow uses ReplyKeyboard with text handlers in peer.ts.
+ * These callbacks handle quick-select buttons and fallback compatibility.
  */
 export function registerCreationHandlers(bot: Bot<BotContext>) {
     /**
-     * Handle node selection
+     * Handle node selection from InlineKeyboard (used by /addpeer command)
      */
     bot.callbackQuery(/^peer:node:(.+)$/, async (ctx) => {
-        const selectedLabel = ctx.match?.[1];
-        if (!selectedLabel || !ctx.session.peerFlow?.nodeMap) return;
+        const nodeName = ctx.match?.[1];
+        const flow = ctx.session.peerFlow;
+        if (!nodeName || !flow?.nodeMap) return;
 
-        const nodeInfo = ctx.session.peerFlow.nodeMap[selectedLabel];
+        const nodeInfo = flow.nodeMap[nodeName];
         if (!nodeInfo) {
-            await ctx.answerCallbackQuery('❌ Invalid node');
+            await ctx.answerCallbackQuery({ text: 'Invalid node' });
             return;
         }
 
-        const asn = ctx.session.asn || 0;
-        const userPort = calculatePort(asn);
+        // Get ASN from peerFlow.targetAsn (/addpeer) or ctx.session.asn (/peer)
+        const asn = flow.targetAsn || ctx.session.asn || 0;
+        // Calculate port based on ASN
+        let userPort: number;
+        if (asn >= 4242420000 && asn <= 4242429999) {
+            userPort = 30000 + (asn % 10000);
+        } else if (asn >= 4201270000 && asn <= 4201279999) {
+            userPort = 40000 + (asn % 10000);
+        } else {
+            userPort = 50000 + (asn % 10000);
+        }
 
         ctx.session.peerFlow = {
-            ...ctx.session.peerFlow,
-            step: 'show_wg_info',
-            routerName: selectedLabel.split(' (')[0],
-            routerUuid: nodeInfo.uuid,
-            serverEndpoint: nodeInfo.endpoint,
+            ...flow,
+            step: 'await_continue',
+            routerName: nodeName,
+            sessionUuid: nodeInfo.uuid,
+            serverEndpoint: `${nodeName}.dn42.moenet.work`,
             serverPort: userPort,
             serverPubkey: nodeInfo.pubkey,
             serverLla: `fe80::998:${nodeInfo.regionCode}:${nodeInfo.nodeId}:1`,
         };
 
         await ctx.answerCallbackQuery();
-        await ctx.editMessageText(`✅ Selected: ${selectedLabel}`);
+        await ctx.editMessageText(`✅ Selected: ${nodeName}`);
+
+        // Import and call showServerWgInfo
+        const { showServerWgInfo } = await import('../ui');
         await showServerWgInfo(ctx);
     });
 
     /**
-     * Session Type Selection
-     */
-    bot.callbackQuery('peer:select_session_type', async (ctx) => {
-        if (!ctx.session.peerFlow) return;
-
-        await ctx.answerCallbackQuery();
-
-        const keyboard = new InlineKeyboard()
-            .text('MP-BGP + ENH (推荐)', 'peer:session:enh')
-            .row()
-            .text('ULA/GUA 模式', 'peer:session:ula');
-
-        await ctx.reply(
-            `📡 *Session Type 会话类型*\n\n` +
-            `**MP-BGP + ENH (推荐)**\n` +
-            `Uses Link-Local addresses only. No extra IPs needed.\n` +
-            `仅使用 Link-Local 地址，无需额外 IP。\n\n` +
-            `**ULA/GUA Mode**\n` +
-            `Uses your ULA/GUA addresses. You must provide ALL IPs from YOUR pool.\n` +
-            `使用你的 ULA/GUA 地址。所有 IP 都必须从你的 IP 池分配。\n\n` +
-            `⚠️ We will verify IP ownership in DN42 registry.\n` +
-            `⚠️ 我们将在 DN42 注册表验证 IP 所有权。`,
-            { parse_mode: 'Markdown', reply_markup: keyboard }
-        );
-    });
-
-    /**
-     * Handle ENH mode selection
-     */
-    bot.callbackQuery('peer:session:enh', async (ctx) => {
-        if (!ctx.session.peerFlow) return;
-
-        ctx.session.peerFlow.step = 'input_ipv6';
-        ctx.session.peerFlow.sessionType = 'ipv6_only';
-
-        const asn = ctx.session.asn || 0;
-        const suggested = `fe80::${asn % 10000}`;
-
-        await ctx.answerCallbackQuery();
-        await ctx.editMessageText(`✅ Session Type: *MP-BGP + ENH*`, { parse_mode: 'Markdown' });
-
-        const keyboard = new InlineKeyboard().text(suggested, `peer:ipv6:${suggested}`);
-
-        await ctx.reply(
-            `📝 *Peer IPv6 Address 对方 IPv6 地址*\n\n` +
-            `Enter your Link-Local IPv6 address for BGP peering.\n` +
-            `请输入你用于 BGP 对等的 Link-Local IPv6 地址。\n\n` +
-            `Suggested 建议: \`${suggested}\`\n` +
-            `You can also enter a custom Link-Local address.\n` +
-            `你也可以输入其他 Link-Local 地址。`,
-            { parse_mode: 'Markdown', reply_markup: keyboard }
-        );
-    });
-
-    /**
-     * Handle ULA mode selection
-     */
-    bot.callbackQuery('peer:session:ula', async (ctx) => {
-        if (!ctx.session.peerFlow) return;
-
-        ctx.session.peerFlow.step = 'input_peer_ipv6_ula';
-        ctx.session.peerFlow.sessionType = 'ipv6_ipv4';
-
-        await ctx.answerCallbackQuery();
-        await ctx.editMessageText(`✅ Session Type: *ULA/GUA Mode*`, { parse_mode: 'Markdown' });
-
-        await ctx.reply(
-            `📝 *Peer IPv6 Address 对方 IPv6 地址*\n\n` +
-            `Enter your ULA/GUA IPv6 address (from YOUR IP pool).\n` +
-            `请输入你的 ULA/GUA IPv6 地址（从你的 IP 池分配）。\n\n` +
-            `⚠️ Must be registered in DN42 under your ASN.\n` +
-            `⚠️ 必须在 DN42 注册表中属于你的 ASN。`,
-            { parse_mode: 'Markdown' }
-        );
-    });
-
-    /**
-     * Legacy continue to IPv6 input
-     */
-    bot.callbackQuery('peer:continue_to_ipv6', async (ctx) => {
-        if (!ctx.session.peerFlow) return;
-
-        ctx.session.peerFlow.step = 'input_ipv6';
-
-        const asn = ctx.session.asn || 0;
-        const suggested = asn >= 4242420000 && asn <= 4242429999 ? `fe80::${asn % 10000}` : '';
-
-        await ctx.answerCallbackQuery();
-
-        const keyboard = suggested ? new InlineKeyboard().text(suggested, `peer:ipv6:${suggested}`) : undefined;
-
-        await ctx.reply(
-            `📝 *Step 1: IPv6 Address*\n第一步: IPv6 地址\n\n` +
-            `Input your IPv6 address for BGP peering.\n` +
-            `请输入你用于 BGP 对等的 IPv6 地址。\n\n` +
-            `Supported types 支持的类型:\n` +
-            `• \`fe80::/64\` Link-Local\n` +
-            `• \`fc00::/7\` ULA`,
-            { parse_mode: 'Markdown', reply_markup: keyboard }
-        );
-    });
-
-    /**
-     * Handle IPv6 quick select
+     * Handle IPv6 quick select from InlineKeyboard suggestion button
+     * (User can also type IPv6 directly, handled in peer.ts text handler)
      */
     bot.callbackQuery(/^peer:ipv6:(.+)$/, async (ctx) => {
         const ipv6 = ctx.match?.[1];
@@ -171,7 +84,8 @@ export function registerCreationHandlers(bot: Bot<BotContext>) {
     });
 
     /**
-     * Handle None endpoint
+     * Handle None endpoint from legacy InlineKeyboard
+     * (Primary handler is text matching "None (NAT)" in peer.ts)
      */
     bot.callbackQuery('peer:endpoint:none', async (ctx) => {
         if (!ctx.session.peerFlow) return;
@@ -186,7 +100,8 @@ export function registerCreationHandlers(bot: Bot<BotContext>) {
     });
 
     /**
-     * Handle MTU selection callback
+     * Handle MTU selection callback from legacy InlineKeyboard
+     * (Primary handler is text matching in peer.ts input_mtu case)
      */
     bot.callbackQuery(/^peer:mtu:(\d+)$/, async (ctx) => {
         const mtu = parseInt(ctx.match?.[1] || '1420', 10);
@@ -201,7 +116,8 @@ export function registerCreationHandlers(bot: Bot<BotContext>) {
     });
 
     /**
-     * Handle PSK selection callback
+     * Handle PSK selection callback from legacy InlineKeyboard
+     * (Primary handler is text matching in peer.ts input_psk case)
      */
     bot.callbackQuery(/^peer:psk:(auto|none)$/, async (ctx) => {
         const choice = ctx.match?.[1];

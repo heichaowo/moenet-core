@@ -2,9 +2,9 @@ import type { Bot } from 'grammy';
 import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
+import { apiRequest } from '../api';
 import crypto from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -14,7 +14,6 @@ import {
     formatTemplate,
     LOGIN_SUCCESS,
     LOGIN_SIGNATURE_CHALLENGE,
-    CANCELLED,
 } from '../templates';
 import {
     START_WELCOME,
@@ -22,27 +21,12 @@ import {
     LOGIN_EMAIL_SENT,
     ERROR_NOT_LOGGED_IN,
 } from '../i18n';
+import { normalizeAsn, isAsnInput } from './peer/validators';
 
-const execAsync = promisify(exec);
 
 // =============================================================================
 // Types
 // =============================================================================
-
-interface APIResponse {
-    code: number;
-    message?: string;
-    data?: {
-        person?: string;
-        mntBy?: string;
-        availableAuthMethods?: Array<{
-            type: number;
-            value?: string;
-            fingerprint?: string;
-        }>;
-        [key: string]: unknown;
-    };
-}
 
 interface ChallengeData {
     asn: number;
@@ -51,24 +35,39 @@ interface ChallengeData {
     method: 'gpg' | 'ssh' | 'email';
     gpgFp?: string;
     sshKey?: string;
+    email?: string;
+    createdAt: number;
+    attempts: number;
 }
 
 // Store for verification challenges
 const challengeStore = new Map<number, ChallengeData>();
+const CHALLENGE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_VERIFY_ATTEMPTS = 5;
 
-// =============================================================================
-// API Client
-// =============================================================================
+// Periodic cleanup of expired challenges
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of challengeStore) {
+        if (now - data.createdAt > CHALLENGE_TTL_MS) {
+            challengeStore.delete(key);
+        }
+    }
+}, 60_000);
 
-async function apiRequest(endpoint: string, method = 'POST', body?: unknown): Promise<APIResponse> {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<APIResponse>;
+/**
+ * Register user telegramId via admin API (fire-and-forget).
+ */
+async function registerUserTelegramId(asn: number, telegramId: number): Promise<void> {
+    try {
+        await apiRequest('/admin', 'POST', {
+            action: 'registerTelegramId',
+            asn,
+            telegramId,
+        }, config.apiToken);
+    } catch (error) {
+        console.error('[Login] Failed to register telegramId:', error);
+    }
 }
 
 // =============================================================================
@@ -116,24 +115,72 @@ function extractFingerprintFromGpgOutput(stderr: string): string {
 }
 
 /**
- * Decrypt GPG signed message to get original content
+ * Run a command with spawn (no shell) and collect output.
+ *
+ * Used by both GPG and SSH verification to avoid shell injection.
+ */
+function spawnAsync(
+    cmd: string,
+    args: string[],
+    options?: { timeout?: number; stdin?: string }
+): Promise<{ stdout: string; stderr: string; code: number }> {
+    return new Promise((resolve, reject) => {
+        const proc = spawn(cmd, args);
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+
+        proc.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+        proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+
+        if (options?.stdin) {
+            proc.stdin.write(options.stdin);
+            proc.stdin.end();
+        }
+
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            proc.kill('SIGKILL');
+            reject(new Error(`${cmd} timed out`));
+        }, options?.timeout ?? 30000);
+
+        proc.on('close', (code: number | null) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve({ stdout, stderr, code: code ?? 1 });
+        });
+
+        proc.on('error', (err: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(err);
+        });
+    });
+}
+
+/**
+ * Decrypt GPG signed message to get original content.
  */
 async function gpgDecryptChallenge(sigPath: string): Promise<{ content: string | null; stderr: string }> {
     try {
-        const { stdout, stderr } = await execAsync(`gpg --decrypt "${sigPath}" 2>&1`);
-        return { content: stdout.trim(), stderr };
+        const result = await spawnAsync('gpg', ['--decrypt', sigPath]);
+        // gpg outputs decrypted content to stdout and status to stderr
+        const combined = result.stdout + result.stderr;
+        return { content: combined.trim(), stderr: result.stderr };
     } catch (error) {
-        const e = error as Error & { stderr?: string };
-        return { content: null, stderr: e.stderr || String(e) };
+        return { content: null, stderr: String(error) };
     }
 }
 
 /**
- * Import GPG key from keyserver
+ * Import GPG key from keyserver.
  */
 async function recvGpgKeyFromKeyserver(fingerprint: string, keyserver: string): Promise<boolean> {
     try {
-        await execAsync(`gpg --keyserver "${keyserver}" --recv-keys "${fingerprint}"`, { timeout: 30000 });
+        await spawnAsync('gpg', ['--keyserver', keyserver, '--recv-keys', fingerprint], { timeout: 30000 });
         return true;
     } catch {
         return false;
@@ -141,15 +188,16 @@ async function recvGpgKeyFromKeyserver(fingerprint: string, keyserver: string): 
 }
 
 /**
- * Verify GPG signature and check if fingerprint matches
+ * Verify GPG signature and check if fingerprint matches.
  */
 async function tryGpgVerifyFingerprint(
     sigPath: string,
     gpgFingerprints: string[]
 ): Promise<{ success: boolean; fingerprint?: string; error?: string }> {
     try {
-        const { stderr } = await execAsync(`gpg --verify "${sigPath}" 2>&1`);
-        const signatureFingerprint = extractFingerprintFromGpgOutput(stderr);
+        const result = await spawnAsync('gpg', ['--verify', sigPath]);
+        // gpg outputs verification info to stderr
+        const signatureFingerprint = extractFingerprintFromGpgOutput(result.stderr);
 
         if (!signatureFingerprint) {
             return { success: false, error: 'Could not extract fingerprint from signature' };
@@ -179,9 +227,8 @@ async function verifyGpgSignatureFull(
     expectedContent: string,
     gpgFingerprints: string[]
 ): Promise<{ verified: boolean; fingerprint?: string; needsManualKey?: boolean; error?: string }> {
-    const tmpDir = os.tmpdir();
-    const uniqueId = crypto.randomBytes(16).toString('hex');
-    const sigFile = path.join(tmpDir, `sig_${uniqueId}.asc`);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'moenet-gpg-'));
+    const sigFile = path.join(tmpDir, 'sig.asc');
 
     try {
         await fs.writeFile(sigFile, signature);
@@ -227,7 +274,7 @@ async function verifyGpgSignatureFull(
 
     } finally {
         try {
-            await fs.unlink(sigFile);
+            await fs.rm(tmpDir, { recursive: true, force: true });
         } catch { }
     }
 }
@@ -237,46 +284,130 @@ async function verifyGpgSignatureFull(
 // =============================================================================
 
 /**
- * Full SSH signature verification
+ * Full SSH signature verification.
+ *
+ * Handles all Telegram formatting issues:
+ * - Unicode dash substitution (em dash, en dash, etc.)
+ * - Arbitrary line wrapping of base64 body
+ * - Zero-width characters
+ *
+ * Uses spawnAsync (no shell) and pipes challenge via stdin,
+ * matching the old Python project's subprocess.run approach.
  */
+
+const SSH_SIG_HEADER = '-----BEGIN SSH SIGNATURE-----';
+const SSH_SIG_FOOTER = '-----END SSH SIGNATURE-----';
+
 async function verifySshSignatureFull(
     signature: string,
     challenge: string,
     sshKey: string
 ): Promise<{ verified: boolean; error?: string }> {
-    const tmpDir = os.tmpdir();
-    const uniqueId = crypto.randomBytes(16).toString('hex');
-    const sigFile = path.join(tmpDir, `ssh_sig_${uniqueId}.sig`);
-    const pubFile = path.join(tmpDir, `ssh_pub_${uniqueId}.pub`);
-    const allowFile = path.join(tmpDir, `ssh_allow_${uniqueId}.txt`);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'moenet-ssh-'));
+    const sigFile = path.join(tmpDir, 'sig.sig');
+    const pubFile = path.join(tmpDir, 'pub.pub');
+    const allowFile = path.join(tmpDir, 'allow.txt');
 
     try {
-        await fs.writeFile(sigFile, signature);
+        const normalizedSig = normalizeSshSignature(signature);
+
+        await fs.writeFile(sigFile, normalizedSig);
         await fs.writeFile(pubFile, sshKey);
         await fs.writeFile(allowFile, `user ${sshKey}\n`);
 
-        // Escape challenge to prevent shell injection
-        const safeChallenge = challenge.replace(/'/g, "'\\''");
-        const result = await execAsync(
-            `echo -n '${safeChallenge}' | ssh-keygen -Y verify -f "${allowFile}" -I user -n file -s "${sigFile}"`,
-            { timeout: 10000 }
-        );
+        const result = await spawnAsync('ssh-keygen', [
+            '-Y', 'verify',
+            '-f', allowFile,
+            '-I', 'user',
+            '-n', 'file',
+            '-s', sigFile,
+        ], { timeout: 10000, stdin: challenge });
 
-        return { verified: result.stdout.includes('Good signature') || result.stderr.includes('Good signature') };
+        console.log(`[SSH Verify] exit=${result.code}`);
+
+        // ssh-keygen -Y verify outputs: Good "file" signature for user with ...
+        // Check exit code first (most reliable), then regex fallback
+        const combined = result.stdout + result.stderr;
+        const verified = result.code === 0 || /Good\s+"?\w+"?\s+signature/i.test(combined);
+
+        if (!verified) {
+            const errMsg = result.stderr.trim() || result.stdout.trim() || 'Verification failed';
+            return { verified: false, error: errMsg };
+        }
+
+        return { verified: true };
 
     } catch (error) {
-        const e = error as Error & { stdout?: string; stderr?: string };
-        // ssh-keygen outputs "Good signature" even with non-zero exit in some cases
-        if (e.stdout?.includes('Good signature') || e.stderr?.includes('Good signature')) {
-            return { verified: true };
-        }
-        return { verified: false, error: String(error) };
+        console.error(`[SSH Verify] Error: ${(error as Error).message}`);
+        return { verified: false, error: (error as Error).message || String(error) };
     } finally {
-        for (const f of [sigFile, pubFile, allowFile]) {
-            try { await fs.unlink(f); } catch { }
-        }
+        try { await fs.rm(tmpDir, { recursive: true, force: true }); } catch { }
     }
 }
+
+/**
+ * Normalize SSH signature armor to handle ALL Telegram formatting issues.
+ *
+ * Telegram applies multiple auto-formatting transformations:
+ * 1. Consecutive hyphens (---) → em dash (—) or en dash (–)
+ * 2. Various other Unicode dash characters
+ * 3. Zero-width characters inserted between words
+ * 4. Line wrapping at arbitrary widths in message bubbles
+ *
+ * This function:
+ * - Replaces ALL Unicode dash variants back to ASCII hyphens
+ * - Strips zero-width characters
+ * - Extracts the base64 body and re-wraps at 70 chars per line
+ */
+function normalizeSshSignature(raw: string): string {
+    // Step 1: Replace ALL Unicode dash/hyphen variants → ASCII hyphen(s)
+    // Telegram can substitute any of these depending on platform/version
+    let sanitized = raw
+        .replace(/\u2014/g, '---')  // em dash → three hyphens (Telegram replaces --- with —)
+        .replace(/\u2013/g, '-')    // en dash → hyphen
+        .replace(/\u2012/g, '-')    // figure dash
+        .replace(/\u2015/g, '-')    // horizontal bar
+        .replace(/\u2212/g, '-')    // minus sign
+        .replace(/\u2011/g, '-')    // non-breaking hyphen
+        .replace(/\uFE63/g, '-')    // small hyphen-minus
+        .replace(/\uFF0D/g, '-')    // fullwidth hyphen-minus
+        .replace(/\u2010/g, '-');   // hyphen (yes, there's a separate Unicode hyphen)
+
+    // Step 2: Remove zero-width characters
+    sanitized = sanitized
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+
+    // Step 3: Trim
+    sanitized = sanitized.trim();
+
+    // Step 4: Find header and footer
+    const headerIdx = sanitized.indexOf(SSH_SIG_HEADER);
+    const footerIdx = sanitized.indexOf(SSH_SIG_FOOTER);
+
+    if (headerIdx === -1 || footerIdx === -1) {
+        // Fallback: return as-is with trailing newline
+        return sanitized + '\n';
+    }
+
+    const headerEnd = headerIdx + SSH_SIG_HEADER.length;
+
+    // Step 5: Extract base64 body, strip ALL whitespace
+    const base64Body = sanitized.slice(headerEnd, footerIdx).replace(/\s+/g, '');
+
+    // Step 6: Re-wrap at 70 chars per line (standard PEM/sshsig format)
+    const wrappedLines: string[] = [];
+    for (let i = 0; i < base64Body.length; i += 70) {
+        wrappedLines.push(base64Body.slice(i, i + 70));
+    }
+
+    return [
+        SSH_SIG_HEADER,
+        ...wrappedLines,
+        SSH_SIG_FOOTER,
+        '',
+    ].join('\n');
+}
+
 
 // =============================================================================
 // Command Registration
@@ -297,10 +428,13 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             ctx.session.isAdmin = true;
         }
 
-        // Send welcome message (plain text with link preview)
-        await ctx.reply(START_WELCOME, { link_preview_options: { is_disabled: false } });
+        // Send welcome message (MarkdownV2 for links and formatting)
+        await ctx.reply(START_WELCOME, {
+            parse_mode: 'MarkdownV2',
+            link_preview_options: { is_disabled: true },
+        });
 
-        // Send command list as second message (with code block)
+        // Send command list as second message
         await ctx.reply(START_COMMANDS, { parse_mode: 'Markdown' });
     });
 
@@ -309,12 +443,21 @@ export function registerUserCommands(bot: Bot<BotContext>) {
      */
     bot.command('cancel', async (ctx) => {
         const userId = ctx.from?.id;
+        let hadFlow = false;
+
         if (userId) {
             challengeStore.delete(userId);
-            ctx.session.awaitingAsn = false;
+            if (ctx.session.awaitingAsn) { ctx.session.awaitingAsn = false; hadFlow = true; }
         }
+        // Clean up admin flows
+        if (ctx.session.announceFlow) { ctx.session.announceFlow = undefined; hadFlow = true; }
+        if (ctx.session.notifyFlow) { ctx.session.notifyFlow = undefined; hadFlow = true; }
+        if (ctx.session.awaitingInfoAsn) { ctx.session.awaitingInfoAsn = false; hadFlow = true; }
+
         await ctx.reply(
-            `${ICONS.cancel} Operation cancelled. No ongoing operations.\n操作已取消。没有正在进行的操作。`
+            hadFlow
+                ? `${ICONS.cancel} Operation cancelled.\n操作已取消。`
+                : `${ICONS.cancel} No ongoing operations.\n没有正在进行的操作。`
         );
     });
 
@@ -335,13 +478,34 @@ export function registerUserCommands(bot: Bot<BotContext>) {
 
         // Mark that we're awaiting ASN input
         ctx.session.awaitingAsn = true;
+
+        const keyboard = new InlineKeyboard()
+            .text('🚫 Cancel 取消', 'login:cancel');
+
         await ctx.reply(
             `${ICONS.login} *DN42 Login 登录*\n${DIVIDER}\n` +
             `Enter your ASN\n请输入你的 ASN\n\n` +
-            `Example: \`AS4242420998\` or \`4242420998\`\n\n` +
-            `/cancel to abort 取消`,
-            { parse_mode: 'Markdown' }
+            `Example: \`998\`, \`0998\`, \`AS4242420998\` or \`4242420998\``,
+            { parse_mode: 'Markdown', reply_markup: keyboard }
         );
+    });
+
+    // login:cancel → abort login flow
+    bot.callbackQuery('login:cancel', async (ctx) => {
+        const userId = ctx.from?.id;
+
+        // If still awaiting ASN input, full cancel
+        if (ctx.session.awaitingAsn) {
+            if (userId) challengeStore.delete(userId);
+            ctx.session.awaitingAsn = false;
+            await ctx.answerCallbackQuery();
+            await ctx.editMessageText(`${ICONS.cancel} Login cancelled.\n登录已取消。`);
+            return;
+        }
+
+        // Already past ASN stage — just dismiss stale button, don't disrupt active flow
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(`${ICONS.cancel} Login cancelled.\n登录已取消。`);
     });
 
     // Handle ASN input for login
@@ -353,24 +517,22 @@ export function registerUserCommands(bot: Bot<BotContext>) {
 
         const text = ctx.message.text.trim();
 
-        // Cancel
-        if (text === '/cancel') {
+        // If a command, cancel login and pass through
+        if (text.startsWith('/')) {
             ctx.session.awaitingAsn = false;
-            await ctx.reply(`${ICONS.cancel} ${CANCELLED}`);
-            return;
+            return next();
         }
 
         // Check if it looks like an ASN
-        const asnMatch = text.match(/^(?:AS)?(\d+)$/i);
-        if (!asnMatch?.[1]) {
-            await ctx.reply(`${ICONS.error} Invalid ASN format. Example: 4242420998\n无效的 ASN 格式。`);
+        if (!isAsnInput(text)) {
+            await ctx.reply(`${ICONS.error} Invalid ASN format. Example: 998, 0998, AS4242420998\n无效的 ASN 格式。`);
             return;
         }
 
-        const asn = parseInt(asnMatch[1]);
+        const asn = normalizeAsn(text);
 
         if (asn < 4242420000 || asn > 4242429999) {
-            await ctx.reply(`${ICONS.error} Invalid ASN. DN42 range: 4242420000-4242429999`);
+            await ctx.reply(`${ICONS.error} Invalid ASN. DN42 range: 4242420000-4242429999\n无效的 ASN。DN42 范围: 4242420000-4242429999`);
             return;
         }
 
@@ -410,14 +572,19 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             const emails: string[] = [];
 
             for (const method of availableAuthMethods) {
-                if (method.type === 1 && method.fingerprint) {
-                    gpgFingerprints.push(method.fingerprint);
-                } else if (method.type === 2 && method.value) {
-                    sshKeys.push(method.value);
-                } else if (method.type === 3 && method.value) {
-                    emails.push(method.value);
+                // Handle both formats: {type, value/fingerprint} and {type, name/data}
+                const val = method.value || method.name || method.data || method.fingerprint;
+                if (method.type === 1 && val) {
+                    gpgFingerprints.push(val);
+                } else if (method.type === 2 && val) {
+                    sshKeys.push(val);
+                } else if (method.type === 3 && val) {
+                    emails.push(val);
                 }
             }
+
+            // Log method counts (avoid logging full key material)
+            console.log(`[Login] AS${asn} auth methods - GPG: ${gpgFingerprints.length}, SSH: ${sshKeys.length}, Email: ${emails.length}`);
 
             // Build auth method keyboard
             const keyboard = new InlineKeyboard();
@@ -432,6 +599,7 @@ export function registerUserCommands(bot: Bot<BotContext>) {
                 keyboard.text('📧 Email 邮箱', `login:email:${asn}`).row();
             }
 
+
             // Store available auth data
             challengeStore.set(ctx.from.id, {
                 asn,
@@ -440,12 +608,17 @@ export function registerUserCommands(bot: Bot<BotContext>) {
                 method: 'email', // default
                 gpgFp: gpgFingerprints[0],
                 sshKey: sshKeys[0],
+                email: emails[0],
+                createdAt: Date.now(),
+                attempts: 0,
             });
+
+            keyboard.text('🚫 Cancel 取消', 'login:cancel').row();
 
             await ctx.reply(
                 `👤 *${person}* (AS${asn})\n\n` +
-                `Choose authentication method. Use /cancel to interrupt.\n` +
-                `选择验证方式。使用 /cancel 终止操作。`,
+                `Choose authentication method.\n` +
+                `选择验证方式。`,
                 {
                     parse_mode: 'Markdown',
                     reply_markup: keyboard,
@@ -453,7 +626,7 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             );
         } catch (error) {
             console.error('[Login] Error:', error);
-            await ctx.reply(`${ICONS.error} Failed to query authentication methods`);
+            await ctx.reply(`${ICONS.error} Failed to query authentication methods\n查询认证方式失败`);
         }
     });
 
@@ -478,6 +651,8 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             challenge,
             method: 'gpg',
             gpgFp,
+            createdAt: Date.now(),
+            attempts: 0,
         });
 
         const fpDisplay = gpgFp.length > 16 ? `${gpgFp.slice(0, 8)}...${gpgFp.slice(-8)}` : gpgFp;
@@ -521,6 +696,8 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             challenge,
             method: 'ssh',
             sshKey,
+            createdAt: Date.now(),
+            attempts: 0,
         });
 
         const sshKeyDisplay = sshKey.length > 60 ? `\`${sshKey.slice(0, 60)}...\`` : `\`${sshKey}\``;
@@ -552,6 +729,20 @@ export function registerUserCommands(bot: Bot<BotContext>) {
         const userId = ctx.from.id;
 
         const stored = challengeStore.get(userId);
+        const email = stored?.email;
+
+        if (!email) {
+            await ctx.answerCallbackQuery();
+            await ctx.editMessageText(
+                `📧 *Email Login*\n\n` +
+                `${ICONS.error} No email address found for AS${asn}.\n` +
+                `未找到 AS${asn} 的邮箱地址。\n\n` +
+                `Please use GPG or SSH authentication instead.\n` +
+                `请使用 GPG 或 SSH 认证。`,
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
 
         // Generate 6-digit code
         const code = String(Math.floor(100000 + Math.random() * 900000));
@@ -562,26 +753,61 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             mntBy: stored?.mntBy || `AS${asn}-MNT`,
             challenge: code,
             method: 'email',
+            email,
+            createdAt: Date.now(),
+            attempts: 0,
         });
 
-        // Send email via API
+        await ctx.answerCallbackQuery();
+
         try {
-            const result = await apiRequest('/auth', 'POST', {
+            // Send verification email via admin API (Mailgun)
+            const result = await apiRequest('/admin', 'POST', {
                 action: 'sendEmail',
-                asn: String(asn),
+                email,
+                asn,
                 code,
-            });
+            }, config.apiToken);
 
             if (result.code !== 0) {
-                await ctx.answerCallbackQuery(`${ICONS.error} ${result.message}`);
+                await ctx.editMessageText(
+                    `📧 *Email Login*\n\n` +
+                    `${ICONS.error} Failed to send verification email.\n` +
+                    `发送验证邮件失败。\n\n` +
+                    `Error: ${result.message}\n\n` +
+                    `Please use GPG or SSH authentication instead.\n` +
+                    `请使用 GPG 或 SSH 认证。`,
+                    { parse_mode: 'Markdown' }
+                );
+                challengeStore.delete(userId);
                 return;
             }
 
-            await ctx.answerCallbackQuery();
-            await ctx.editMessageText(LOGIN_EMAIL_SENT, { parse_mode: 'Markdown' });
+            // Mask email for display
+            const maskedEmail = email.replace(/^(.{2})(.*)(@.*)$/, '$1***$3');
+
+            await ctx.editMessageText(
+                `📧 *Email Login*\n\n` +
+                `✉️ Verification code has been sent to:\n` +
+                `验证码已发送至：\n` +
+                `\`${maskedEmail}\`\n\n` +
+                `Please enter the 6-digit code.\n` +
+                `请输入 6 位验证码。\n\n` +
+                `The code will expire in 10 minutes.\n` +
+                `验证码将在 10 分钟后过期。\n\n` +
+                `Use /cancel to interrupt.\n` +
+                `使用 /cancel 终止操作。`,
+                { parse_mode: 'Markdown' }
+            );
         } catch (error) {
-            console.error('[Email] Error:', error);
-            await ctx.answerCallbackQuery(`${ICONS.error} Failed to send email`);
+            console.error('[Login] Email send error:', error);
+            await ctx.editMessageText(
+                `📧 *Email Login*\n\n` +
+                `${ICONS.error} Failed to send verification email.\n` +
+                `发送验证邮件失败。`,
+                { parse_mode: 'Markdown' }
+            );
+            challengeStore.delete(userId);
         }
     });
 
@@ -594,13 +820,33 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             return next();
         }
 
+        // Check TTL
+        if (Date.now() - stored.createdAt > CHALLENGE_TTL_MS) {
+            challengeStore.delete(userId);
+            await ctx.reply(
+                `${ICONS.error} Challenge expired. Please use /login again.\n` +
+                `验证已过期，请重新 /login。`
+            );
+            return;
+        }
+
+        // Check attempt limit
+        stored.attempts++;
+        if (stored.attempts > MAX_VERIFY_ATTEMPTS) {
+            challengeStore.delete(userId);
+            await ctx.reply(
+                `${ICONS.error} Too many failed attempts. Please use /login again.\n` +
+                `失败次数过多，请重新 /login。`
+            );
+            return;
+        }
+
         const text = ctx.message.text.trim();
 
-        // Cancel
-        if (text === '/cancel') {
+        // If a command, clean up and pass through
+        if (text.startsWith('/')) {
             challengeStore.delete(userId);
-            await ctx.reply(`${ICONS.cancel} ${CANCELLED}`);
-            return;
+            return next();
         }
 
         const { asn, mntBy, challenge, method } = stored;
@@ -612,6 +858,8 @@ export function registerUserCommands(bot: Bot<BotContext>) {
                     challengeStore.delete(userId);
                     ctx.session.asn = asn;
                     ctx.session.person = mntBy;
+                    // Persist telegramId → users table (non-blocking)
+                    registerUserTelegramId(asn, userId).then(() => { ctx.session._registered = true; }).catch(() => {});
                     await ctx.reply(
                         `${ICONS.success} *Signature verified successfully!*\n` +
                         `${ICONS.success} *签名验证成功！*\n\n` +
@@ -631,6 +879,8 @@ export function registerUserCommands(bot: Bot<BotContext>) {
                     challengeStore.delete(userId);
                     ctx.session.asn = asn;
                     ctx.session.person = mntBy;
+                    // Persist telegramId → users table (non-blocking)
+                    registerUserTelegramId(asn, userId).then(() => { ctx.session._registered = true; }).catch(() => {});
                     await ctx.reply(
                         `${ICONS.success} *Signature verified successfully!*\n` +
                         `${ICONS.success} *签名验证成功！*\n\n` +
@@ -665,6 +915,8 @@ export function registerUserCommands(bot: Bot<BotContext>) {
                     challengeStore.delete(userId);
                     ctx.session.asn = asn;
                     ctx.session.person = mntBy;
+                    // Persist telegramId → users table (non-blocking)
+                    registerUserTelegramId(asn, userId).then(() => { ctx.session._registered = true; }).catch(() => {});
                     await ctx.reply(
                         `${ICONS.success} *Signature verified successfully!*\n` +
                         `${ICONS.success} *签名验证成功！*\n\n` +
@@ -673,13 +925,13 @@ export function registerUserCommands(bot: Bot<BotContext>) {
                         { parse_mode: 'Markdown' }
                     );
                 } else {
+                    challengeStore.delete(userId);
                     await ctx.reply(
                         `${ICONS.error} *Signature verification failed*\n签名验证失败\n\n` +
                         `${result.error || 'Unknown error'}\n\n` +
                         `Use /login to try again.\n使用 /login 重试。`,
                         { parse_mode: 'Markdown' }
                     );
-                    challengeStore.delete(userId);
                 }
             }
         } catch (error) {

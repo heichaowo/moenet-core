@@ -1,37 +1,43 @@
-import type { Context } from 'hono';
-import { getModels } from '../db/dbContext';
-import config from '../config';
+import type { Context } from "hono";
+import config from "../config";
+import { getModels } from "../db/dbContext";
 
 /**
  * Bootstrap Handler
- * 
+ *
  * GET /bootstrap/:token - Returns installation script for node setup
  */
 export default async function bootstrapHandler(c: Context): Promise<Response> {
-    const token = c.req.param('token');
+	const token = c.req.param("token");
 
-    if (!token) {
-        return c.text('# Error: Missing bootstrap token\nexit 1', 400);
-    }
+	if (!token) {
+		return c.text("# Error: Missing bootstrap token\nexit 1", 400);
+	}
 
-    const models = getModels();
-    const router = await models.routers.findOne({
-        where: { bootstrapToken: token },
-    });
+	const models = getModels();
+	const router = await models.routers.findOne({
+		where: { bootstrapToken: token },
+	});
 
-    if (!router) {
-        return c.text('# Error: Invalid or expired bootstrap token\nexit 1', 404);
-    }
+	if (!router) {
+		return c.text("# Error: Invalid or expired bootstrap token\nexit 1", 404);
+	}
 
-    const nodeId = router.get('nodeId') as number;
-    const name = router.get('name') as string;
-    const coreUrl = config.app.coreUrl || 'https://api.moenet.work';
-    const agentApiKey = config.auth.agentApiKey;
-    const agentDownloadUrl = config.app.agentDownloadUrl || 'https://github.com/heichaowo/moenet-agent/releases/latest/download/moenet-agent-linux-amd64';
-    const birdDownloadUrl = config.app.birdDownloadUrl || 'https://github.com/heichaowo/dn42-binaries/releases/latest/download/bird';
-    const birdcDownloadUrl = config.app.birdcDownloadUrl || 'https://github.com/heichaowo/dn42-binaries/releases/latest/download/birdc';
+	const nodeId = router.get("nodeId") as number;
+	const name = router.get("name") as string;
+	const coreUrl = config.app.coreUrl || "https://api.moenet.work";
+	const agentApiKey = config.auth.agentApiKey;
+	const agentDownloadUrl =
+		config.app.agentDownloadUrl ||
+		"https://github.com/heichaowo/moenet-agent/releases/latest/download/moenet-agent-linux-amd64";
+	const birdDownloadUrl =
+		config.app.birdDownloadUrl ||
+		"https://github.com/heichaowo/dn42-binaries/releases/latest/download/bird";
+	const birdcDownloadUrl =
+		config.app.birdcDownloadUrl ||
+		"https://github.com/heichaowo/dn42-binaries/releases/latest/download/birdc";
 
-    const script = `#!/bin/bash
+	const script = `#!/bin/bash
 set -e
 
 # ============================================================================
@@ -341,7 +347,7 @@ echo "  journalctl -u moenet-agent -f"
 echo ""
 `;
 
-    return c.text(script, 200, {
-        'Content-Type': 'text/x-shellscript',
-    });
+	return c.text(script, 200, {
+		"Content-Type": "text/x-shellscript",
+	});
 }

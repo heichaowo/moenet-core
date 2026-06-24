@@ -37,8 +37,10 @@ mock.module('../../src/common/helpers', () => ({
     bcryptCompare: mock(async (expected: string, token: string) => {
         return token === 'valid-token';
     }),
+    timingSafeCompare: (a: string, b: string) => a === b,
     generateUUID: () => 'test-uuid-12345',
     getInterfaceName: (asn: number) => `dn42_${asn}`,
+    getListenPort: (asn: number) => 20000 + (asn % 10000),
 }));
 
 // Mock config

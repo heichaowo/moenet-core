@@ -2,31 +2,14 @@ import type { Bot } from 'grammy';
 import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
+import { apiRequest } from '../api';
+import { isAdmin } from '../guards';
+import { normalizeAsn } from './peer/validators';
 
-/**
- * API client
- */
-async function apiRequest(endpoint: string, method = 'POST', body?: unknown) {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.apiToken}`,
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<ApiResponse>;
-}
-
-function isAdmin(ctx: BotContext): boolean {
-    const username = ctx.from?.username?.toLowerCase();
-    const adminUsername = config.adminUsername.toLowerCase().replace('@', '');
-    return username === adminUsername || ctx.session.isAdmin === true;
-}
 
 export function registerBlockCommands(bot: Bot<BotContext>) {
     /**
-     * /block [asn] - Manage blacklist
+     * /block [asn] [reason] - Block an ASN or show blocklist
      */
     bot.command('block', async (ctx) => {
         if (!isAdmin(ctx)) {
@@ -34,26 +17,88 @@ export function registerBlockCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        const asn = ctx.match?.trim();
+        const args = ctx.match?.trim().split(/\s+/) || [];
 
-        if (!asn) {
-            // Show blocklist
+        if (!args[0]) {
+            // No args — show blocklist
             await showBlocklist(ctx);
             return;
         }
 
         // Block new ASN
-        const asnNumber = parseInt(asn.replace(/^AS/i, ''), 10);
+        const asnNumber = normalizeAsn(args[0]);
         if (isNaN(asnNumber)) {
+            await ctx.reply('❌ Invalid ASN format.');
+            return;
+        }
+
+        const reason = args.slice(1).join(' ') || undefined;
+
+        try {
+            const result = await apiRequest('/admin', 'POST', {
+                action: 'blockAsn',
+                asn: asnNumber,
+                reason,
+            }, config.apiToken);
+
+            if (result.code !== 0) {
+                await ctx.reply(`❌ Error: ${result.message}`);
+                return;
+            }
+
+            const reasonText = reason ? `\nReason: ${reason}` : '';
+            await ctx.reply(
+                `🚫 *AS${asnNumber} Blocked*\nASN 已加入黑名单${reasonText}`,
+                { parse_mode: 'Markdown' }
+            );
+        } catch (error) {
+            console.error('[Block] Error:', error);
+            await ctx.reply('❌ Failed to block ASN.');
+        }
+    });
+
+    /**
+     * /blocked - Show blocklist (alias)
+     */
+    bot.command('blocked', async (ctx) => {
+        if (!isAdmin(ctx)) {
+            await ctx.reply('❌ Admin access required.');
+            return;
+        }
+        await showBlocklist(ctx);
+    });
+
+    /**
+     * /unblock <asn> - Unblock an ASN
+     */
+    bot.command('unblock', async (ctx) => {
+        if (!isAdmin(ctx)) {
+            await ctx.reply('❌ Admin access required.');
+            return;
+        }
+
+        const asnStr = ctx.match?.trim();
+        if (!asnStr) {
+            await ctx.reply(
+                '📋 *Usage 用法:*\n`/unblock <ASN>` — unblock an ASN\n\n' +
+                'Or use /block to see the blocklist with inline unblock buttons.\n' +
+                '或使用 /block 查看黑名单（带解封按钮）',
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+
+        const asn = normalizeAsn(asnStr);
+        if (isNaN(asn)) {
             await ctx.reply('❌ Invalid ASN format.');
             return;
         }
 
         try {
             const result = await apiRequest('/admin', 'POST', {
-                action: 'blockAsn',
-                asn: asnNumber,
-            });
+                action: 'unblockAsn',
+                asn,
+            }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.reply(`❌ Error: ${result.message}`);
@@ -61,12 +106,12 @@ export function registerBlockCommands(bot: Bot<BotContext>) {
             }
 
             await ctx.reply(
-                `🚫 *AS${asnNumber} Blocked*\nASN 已加入黑名单`,
+                `✅ *AS${asn} Unblocked*\nASN 已从黑名单移除`,
                 { parse_mode: 'Markdown' }
             );
         } catch (error) {
-            console.error('[Block] Error:', error);
-            await ctx.reply('❌ Failed to block ASN.');
+            console.error('[Unblock] Error:', error);
+            await ctx.reply('❌ Failed to unblock ASN.');
         }
     });
 
@@ -85,7 +130,7 @@ export function registerBlockCommands(bot: Bot<BotContext>) {
             const result = await apiRequest('/admin', 'POST', {
                 action: 'unblockAsn',
                 asn,
-            });
+            }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.answerCallbackQuery(`❌ ${result.message}`);
@@ -121,7 +166,7 @@ async function showBlocklist(ctx: BotContext, editMessageId?: number) {
     try {
         const result = await apiRequest('/admin', 'POST', {
             action: 'enumBlocklist',
-        });
+        }, config.apiToken);
 
         if (result.code !== 0) {
             const msg = `❌ Error: ${result.message}`;

@@ -2,24 +2,27 @@ import type { Bot } from 'grammy';
 import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
+import { getNodes, getAgentEndpoint } from '../providers/nodes';
+import { normalizeAsn } from './peer/validators';
 
 const ERROR_NOT_LOGGED_IN = '❌ Please /login first\n请先登录';
 
 /**
- * Call agent API
+ * Call agent API using getAgentEndpoint for node resolution
  */
 async function callAgentApi(nodeId: string, method: string, path: string, body?: unknown): Promise<unknown> {
-    const host = (config.agentHosts as Record<string, string>)?.[nodeId];
-    if (!host) return null;
+    const endpoint = await getAgentEndpoint(nodeId);
+    if (!endpoint) return null;
 
     try {
-        const response = await fetch(`http://${host}:${config.agentPort || 8080}${path}`, {
+        const response = await fetch(`${endpoint}${path}`, {
             method,
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${config.agentToken || ''}`,
             },
             body: body ? JSON.stringify(body) : undefined,
+            signal: AbortSignal.timeout(5000),
         });
         return response.json();
     } catch (error) {
@@ -72,24 +75,21 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        // Get first available node
-        const nodes = Object.keys(config.nodeNames as Record<string, string> || {});
-        if (nodes.length === 0) {
-            await ctx.reply('❌ No nodes configured for community stats.');
+        // Get nodes from API provider
+        const nodesMap = await getNodes();
+        const nodeIds = Array.from(nodesMap.keys()).sort();
+        if (nodeIds.length === 0) {
+            await ctx.reply('❌ No nodes available for community stats.');
             return;
         }
 
-        const nodeId = nodes[0];
-        if (!nodeId) {
-            await ctx.reply('❌ No nodes configured for community stats.');
-            return;
-        }
-        const nodeName = config.nodeNames[nodeId] || nodeId;
+        const nodeId = nodeIds[0]!;
+        const nodeName = nodesMap.get(nodeId)?.location || nodeId;
 
         await ctx.reply(`📊 Fetching community stats from ${nodeName}...`);
 
         try {
-            const stats = await callAgentApi(nodeId, 'GET', '/communities') as CommunityStats | null;
+            const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
             if (!stats) {
                 await ctx.reply('❌ Failed to get community stats.\n无法获取 community 统计。');
@@ -116,10 +116,10 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
                 .replace('{regions}', regionsText)
                 .replace('{total}', String(stats.total_routes || 0));
 
-            // Node selection keyboard
+            // Node selection keyboard (sorted)
             const keyboard = new InlineKeyboard();
-            nodes.forEach(n => {
-                const name = (config.nodeNames as Record<string, string>)?.[n] || n;
+            nodeIds.forEach(n => {
+                const name = nodesMap.get(n)?.location || n;
                 keyboard.text(n === nodeId ? `✅ ${name}` : name, `community:${n}`);
             });
 
@@ -134,11 +134,13 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
     bot.callbackQuery(/^community:(.+)$/, async (ctx) => {
         const nodeId = ctx.match?.[1];
         if (!nodeId) return;
-        const nodeName = (config.nodeNames as Record<string, string>)?.[nodeId] || nodeId;
+
+        const nodesMap = await getNodes();
+        const nodeName = nodesMap.get(nodeId)?.location || nodeId;
 
         await ctx.answerCallbackQuery('Loading...');
 
-        const stats = await callAgentApi(nodeId, 'GET', '/communities') as CommunityStats | null;
+        const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
         if (!stats) {
             await ctx.answerCallbackQuery('Failed to load stats');
@@ -165,10 +167,10 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             .replace('{regions}', regionsText)
             .replace('{total}', String(stats.total_routes || 0));
 
-        const nodes = Object.keys(config.nodeNames as Record<string, string> || {});
+        const nodeIds = Array.from(nodesMap.keys()).sort();
         const keyboard = new InlineKeyboard();
-        nodes.forEach(n => {
-            const name = (config.nodeNames as Record<string, string>)?.[n] || n;
+        nodeIds.forEach(n => {
+            const name = nodesMap.get(n)?.location || n;
             keyboard.text(n === nodeId ? `✅ ${name}` : name, `community:${n}`);
         });
 
@@ -184,8 +186,8 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        const asnArg = ctx.match?.trim().replace(/^AS/i, '');
-        const asn = asnArg ? parseInt(asnArg) : ctx.session.asn;
+        const asnRaw = ctx.match?.trim();
+        const asn = asnRaw ? normalizeAsn(asnRaw) : ctx.session.asn;
 
         if (!asn || isNaN(asn)) {
             await ctx.reply('用法: /latency [ASN]\n例如: /latency 4242421234');
@@ -203,20 +205,17 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
 
         await ctx.answerCallbackQuery('Starting probe...');
 
-        // Get first node
-        const nodes = Object.keys(config.agentHosts as Record<string, string> || {});
-        if (nodes.length === 0) {
+        // Get first node from provider
+        const nodesMap = await getNodes();
+        const nodeIds = Array.from(nodesMap.keys()).sort();
+        if (nodeIds.length === 0) {
             await ctx.answerCallbackQuery('No nodes available');
             return;
         }
 
-        const firstNode = nodes[0];
-        if (!firstNode) {
-            await ctx.answerCallbackQuery('No nodes available');
-            return;
-        }
+        const firstNode = nodeIds[0]!;
 
-        const result = await callAgentApi(firstNode, 'POST', `/communities/probe/now/${asn}`) as ProbeResult | null;
+        const result = await callAgentApi(firstNode, 'POST', '/probe/now', { asn }) as ProbeResult | null;
 
         if (result?.success) {
             await ctx.answerCallbackQuery(`✅ Probe: ${result.rtt_ms?.toFixed(1)}ms (Tier ${result.latency_tier})`);
@@ -237,19 +236,16 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
 }
 
 async function showLatencyStats(ctx: BotContext, asn: number) {
-    const nodes = Object.keys(config.agentHosts as Record<string, string> || {});
-    if (nodes.length === 0) {
-        await ctx.reply('❌ No nodes configured.');
+    const nodesMap = await getNodes();
+    const nodeIds = Array.from(nodesMap.keys()).sort();
+    if (nodeIds.length === 0) {
+        await ctx.reply('❌ No nodes available.');
         return;
     }
 
-    const firstNode = nodes[0];
-    if (!firstNode) {
-        await ctx.reply('❌ No nodes configured.');
-        return;
-    }
+    const firstNode = nodeIds[0]!;
 
-    const stats = await callAgentApi(firstNode, 'GET', `/communities/probe/peer/${asn}`) as ProbeStats | null;
+    const stats = await callAgentApi(firstNode, 'POST', '/probe/stats', { asn }) as ProbeStats | null;
 
     const keyboard = new InlineKeyboard()
         .text('🔄 立即探测 Probe Now', `probe_now:${asn}`);

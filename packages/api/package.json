@@ -5,7 +5,7 @@
     "scripts": {
         "dev": "bun run --watch src/app.ts",
         "start": "bun run src/app.ts",
-        "build": "bun build src/app.ts --outdir=dist --target=bun",
+        "build": "bun build src/app.ts --outdir=dist --target=bun --external bcrypt --external @mapbox/node-pre-gyp",
         "lint": "bunx @biomejs/biome check src/",
         "test": "bun test"
     },
@@ -15,6 +15,8 @@
         "ioredis": "^5.4.0",
         "ip-address": "^9.0.5",
         "jsonwebtoken": "^9.0.2",
+        "nodemailer": "^9.0.1",
+        "openpgp": "^6.3.1",
         "pg": "^8.13.0",
         "pg-hstore": "^2.3.4",
         "sequelize": "^6.37.0"
@@ -22,6 +24,7 @@
     "devDependencies": {
         "@types/bcrypt": "^5.0.2",
         "@types/jsonwebtoken": "^9.0.7",
+        "@types/nodemailer": "^8.0.1",
         "@types/pg": "^8.11.10"
     }
 }

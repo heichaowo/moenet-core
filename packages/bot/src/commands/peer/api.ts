@@ -5,27 +5,12 @@
  */
 
 import config from '../../config';
+import { apiRequest } from '../../api';
 import type { APIResponse } from './types';
 
-/**
- * API client for moenet-core
- */
-export async function apiRequest(
-    endpoint: string,
-    method = 'POST',
-    body?: unknown,
-    token?: string
-): Promise<APIResponse> {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : '',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<APIResponse>;
-}
+// Re-export for backward compatibility with other modules
+export { apiRequest } from '../../api';
+export type { APIResponse } from './types';
 
 /**
  * Fetch routers list
@@ -101,8 +86,89 @@ export async function deleteSession(uuid: string): Promise<APIResponse> {
 }
 
 /**
- * Restart session
+ * Submit modification changes and execute pending migration.
+ *
+ * Handles deferred migration: field updates are submitted first (updateSession),
+ * then migration is executed (migrate). This ordering is intentional — migrate
+ * re-reads the session from DB, so it picks up the updated fields.
+ *
+ * Returns: { success: boolean; message?: string }
  */
-export async function restartSession(uuid: string): Promise<APIResponse> {
-    return apiRequest('/admin', 'POST', { action: 'restartSession', uuid }, config.apiToken);
+export async function submitModifyChanges(flow: {
+    sessionUuid?: string;
+    current?: Record<string, unknown>;
+    backup?: Record<string, unknown>;
+    routerName?: string;
+    pendingMigration?: { nodeUuid: string; nodeName: string };
+}): Promise<{ success: boolean; migrated: boolean; message?: string }> {
+    const uuid = flow.sessionUuid;
+    const current = flow.current as Record<string, unknown> | undefined;
+    const backup = flow.backup as Record<string, unknown> | undefined;
+
+    if (!uuid || !current) {
+        return { success: false, migrated: false, message: 'No session data' };
+    }
+
+    // Build request with only changed fields
+    const requestBody: Record<string, unknown> = {
+        action: 'updateSession',
+        uuid,
+    };
+
+    if (current.ipv6 !== backup?.ipv6) {
+        requestBody.ipv6 = current.ipv6 || null;
+    }
+    if (current.ipv4 !== backup?.ipv4) {
+        requestBody.ipv4 = current.ipv4 || null;
+    }
+    if (current.localIpv6 !== backup?.localIpv6) {
+        requestBody.ipv6LinkLocal = current.localIpv6 || null;
+    }
+    if (current.localIpv4 !== backup?.localIpv4) {
+        requestBody.localIpv4 = current.localIpv4 || null;
+    }
+    if (current.endpoint !== backup?.endpoint || current.port !== backup?.port) {
+        const fullEndpoint = current.endpoint
+            ? (current.port ? `${current.endpoint}:${current.port}` : current.endpoint)
+            : null;
+        requestBody.endpoint = fullEndpoint;
+    }
+    if (current.mtu !== backup?.mtu) {
+        requestBody.mtu = current.mtu;
+    }
+    if (current.contact !== backup?.contact) {
+        requestBody.contact = current.contact || null;
+    }
+    if (current.mpbgp !== backup?.mpbgp || current.extendedNexthop !== backup?.extendedNexthop) {
+        requestBody.extensions = (current.mpbgp ? 'mp_bgp' : '') + (current.extendedNexthop ? ',extended_nexthop' : '');
+    }
+
+    // Step 1: Submit field changes (if any)
+    const hasFieldChanges = Object.keys(requestBody).length > 2; // more than action + uuid
+    if (hasFieldChanges) {
+        console.log('[submitModifyChanges] Request body:', JSON.stringify(requestBody));
+        const result = await apiRequest('/admin', 'POST', requestBody, config.apiToken);
+        console.log('[submitModifyChanges] Response:', JSON.stringify(result));
+
+        if (result.code !== 0) {
+            return { success: false, migrated: false, message: `Failed to update: ${result.message}` };
+        }
+    }
+
+    // Step 2: Execute pending migration (if set)
+    if (flow.pendingMigration) {
+        const migrateResult = await apiRequest('/admin', 'POST', {
+            action: 'migrate',
+            uuid,
+            newRouter: flow.pendingMigration.nodeUuid,
+        }, config.apiToken);
+
+        if (migrateResult.code !== 0) {
+            return { success: false, migrated: false, message: `Migration failed: ${migrateResult.message}` };
+        }
+
+        return { success: true, migrated: true };
+    }
+
+    return { success: true, migrated: false };
 }

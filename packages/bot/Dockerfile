@@ -18,6 +18,12 @@ RUN cd packages/bot && bun build src/index.ts --outdir=dist --target=bun
 # Production image
 FROM oven/bun:1-slim
 
+# Install openssh-client (ssh-keygen) and gnupg (gpg) for signature verification
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-client \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY --from=builder /app/packages/bot/dist ./

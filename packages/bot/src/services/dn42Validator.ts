@@ -51,7 +51,7 @@ export async function validateIpOwnership(asn: number, ip: string): Promise<Vali
                 warning: `⚠️ Invalid registry response\n注册表响应无效`,
             };
         }
-        const key = keys[0];
+        const key = keys[0]!;
         const obj = data[key];
 
         if (!obj?.Attributes) {
@@ -89,7 +89,7 @@ export async function validateIpOwnership(asn: number, ip: string): Promise<Vali
             const routeData = await routeResponse.json() as Record<string, RegistryObject>;
             const routeKeys = Object.keys(routeData);
             if (routeKeys.length > 0) {
-                const routeKey = routeKeys[0];
+                const routeKey = routeKeys[0]!;
                 const routeObj = routeData[routeKey];
 
                 if (routeObj?.Attributes) {
@@ -172,6 +172,7 @@ export function isDN42IPv4(ip: string): boolean {
 
     const a = parts[0];
     const b = parts[1];
+    if (a === undefined || b === undefined) return false;
 
     // 172.20-23.x.x (172.20.0.0/14)
     if (a === 172 && b >= 20 && b <= 23) return true;

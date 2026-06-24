@@ -1,6 +1,8 @@
 import type { Bot } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
+import { apiRequest } from '../api';
+import { isAdmin } from '../guards';
 
 // Generate random token (replaces nanoid)
 function generateToken(length = 24): string {
@@ -12,31 +14,6 @@ function generateToken(length = 24): string {
         result += chars[randomValues[i]! % chars.length];
     }
     return result;
-}
-
-
-/**
- * API client for moenet-core
- */
-async function apiRequest(endpoint: string, method = 'POST', body?: unknown, token?: string) {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : '',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<ApiResponse>;
-}
-
-/**
- * Check if user is admin
- */
-function isAdmin(ctx: BotContext): boolean {
-    const username = ctx.from?.username?.toLowerCase();
-    const adminUsername = config.adminUsername.toLowerCase().replace('@', '');
-    return username === adminUsername || ctx.session.isAdmin === true;
 }
 
 // Node creation wizard state

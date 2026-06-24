@@ -10,7 +10,7 @@ let redisClient: Redis | null = null;
 /**
  * Get or create Redis client
  */
-function getRedisClient(): Redis | null {
+export function getRedisClient(): Redis | null {
     // Enable Redis when URL is explicitly set (not the default localhost)
     const redisUrl = config.redisUrl;
     if (!redisUrl || redisUrl === 'redis://localhost:6379') {
@@ -73,7 +73,7 @@ export function createRedisStorage<T>(prefix = 'bot:session:'): StorageAdapter<T
                     `${prefix}${key}`,
                     JSON.stringify(value),
                     'EX',
-                    86400 * 7 // 7 days TTL
+                    86400 * 30 // 30 days TTL
                 );
             } catch (error) {
                 console.error('[Redis] Write error:', error);

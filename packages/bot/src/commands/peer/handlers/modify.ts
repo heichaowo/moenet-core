@@ -7,7 +7,7 @@
 import type { Bot } from 'grammy';
 import type { BotContext } from '../../../index';
 import config from '../../../config';
-import { apiRequest } from '../api';
+import { apiRequest, submitModifyChanges } from '../api';
 
 /**
  * Show modify menu helper type - will be passed from peer.ts
@@ -45,6 +45,60 @@ export function registerModifyHandlers(
         ctx.session.peerFlow = undefined;
         await ctx.answerCallbackQuery('Cancelled');
         await ctx.editMessageText('🚫 Modify cancelled.\n已取消修改');
+    });
+
+    /**
+     * Handle modify submit - submit all pending modifications
+     */
+    bot.callbackQuery('modify:submit', async (ctx) => {
+        const flow = ctx.session.peerFlow;
+
+        if (!flow?.sessionUuid || !flow?.current || !flow?.backup) {
+            ctx.session.peerFlow = undefined;
+            await ctx.answerCallbackQuery('Error: No session data');
+            await ctx.editMessageText('❌ Error: No session data');
+            return;
+        }
+
+        await ctx.answerCallbackQuery('Submitting changes...');
+        await ctx.editMessageText('⏳ Submitting changes...\n正在提交更改...');
+
+        try {
+            const result = await submitModifyChanges(flow);
+
+            if (!result.success) {
+                await ctx.reply(`❌ ${result.message}`, { reply_markup: { remove_keyboard: true } });
+                ctx.session.peerFlow = undefined;
+                return;
+            }
+
+            if (result.migrated) {
+                await ctx.reply(
+                    `✅ *Changes submitted & migration initiated!*\n` +
+                    `修改已提交，迁移已启动！\n\n` +
+                    `From: \`${flow.routerName}\` → To: \`${flow.pendingMigration!.nodeName}\`\n\n` +
+                    `Peer will be automatically recreated on the new node.\n` +
+                    `Peer 将在新节点上自动重建。\n\n` +
+                    `⏳ Please wait a few minutes for changes to apply.\n` +
+                    `请等待几分钟让更改生效。`,
+                    { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
+                );
+            } else {
+                await ctx.reply(
+                    `✅ Modification submitted successfully!\n` +
+                    `修改已成功提交！\n\n` +
+                    `Node: \`${flow.routerName}\`\n` +
+                    `Changes will be applied within a few minutes.\n` +
+                    `更改将在几分钟内生效。`,
+                    { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
+                );
+            }
+        } catch (error) {
+            console.error('[modify:submit] Error:', error);
+            await ctx.reply(`❌ Failed to submit changes: ${error instanceof Error ? error.message : 'Unknown error'}`, { reply_markup: { remove_keyboard: true } });
+        }
+
+        ctx.session.peerFlow = undefined;
     });
 
     /**

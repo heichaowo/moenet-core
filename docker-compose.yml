@@ -21,6 +21,8 @@ services:
       - REDIS_PORT=${REDIS_PORT:-6379}
       - AGENT_API_KEY=${AGENT_API_KEY}
       - JWT_SECRET=${JWT_SECRET}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ADMIN_CHAT_ID=${TELEGRAM_ADMIN_CHAT_ID}
       - MAILGUN_API_KEY=${MAILGUN_API_KEY}
       - MAILGUN_DOMAIN=${MAILGUN_DOMAIN}
       - MAILGUN_FROM=${MAILGUN_FROM}
@@ -185,10 +187,20 @@ services:
 
 volumes:
   postgres_data:
+    external: true
+    name: moenet-core_postgres_data
   redis_data:
+    external: true
+    name: moenet-core_redis_data
   traefik_certs:
+    external: true
+    name: moenet-core_traefik_certs
   prometheus_data:
+    external: true
+    name: moenet-core_prometheus_data
   grafana_data:
+    external: true
+    name: moenet-core_grafana_data
 
 
 networks:

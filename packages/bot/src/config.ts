@@ -15,7 +15,7 @@ export default {
     localAsn: Number(process.env.LOCAL_ASN) || 4242420998,
 
     // Agent settings
-    agentPort: Number(process.env.AGENT_PORT) || 8080,
+    agentPort: Number(process.env.AGENT_PORT) || 24368,
     agentToken: process.env.AGENT_TOKEN || '',
     agentHosts: JSON.parse(process.env.AGENT_HOSTS || '{}') as Record<string, string>,
     nodeNames: JSON.parse(process.env.NODE_NAMES || '{}') as Record<string, string>,
@@ -33,6 +33,9 @@ export default {
         maxRequests: Number(process.env.RATE_LIMIT_MAX) || 20,
         windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60000,
     },
+
+    // External services
+    iedonApiBase: process.env.IEDON_API_BASE || 'https://api.iedon.com/dn42',
 
     // Contact info
     telegramContact: process.env.TELEGRAM_CONTACT || '@heicha',

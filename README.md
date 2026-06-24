@@ -78,6 +78,9 @@ docker compose up -d
 | `TELEGRAM_ADMIN_CHAT_ID` | - | Admin notification chat |
 | `REDIS_URL` | (memory) | Redis for session persistence |
 | `LOCAL_ASN` | `4242420998` | Network ASN |
+| `MAILGUN_API_KEY` | - | Mailgun API key (enables email login) |
+| `MAILGUN_DOMAIN` | `dn42.moenet.work` | Mailgun sending domain |
+| `MAILGUN_FROM` | `DN42 Bot <bot@dn42.moenet.work>` | Email sender address |
 
 See `.env.example` for all options.
 
@@ -89,7 +92,7 @@ See `.env.example` for all options.
 |---------|-------------|
 | `/start` | Show welcome message |
 | `/help` | List all commands |
-| `/login` | Authenticate with DN42 ASN |
+| `/login` | Authenticate with DN42 ASN (GPG / SSH / Email) |
 | `/peer` | Create new peering session |
 | `/info` | View your active peers |
 | `/modify` | Change peer settings |
@@ -190,7 +193,7 @@ moenet-core/
 │   │   └── src/
 │   │       ├── handlers/       # Request handlers
 │   │       ├── db/             # Sequelize models
-│   │       └── providers/      # WHOIS, IP detection
+│   │       └── providers/      # WHOIS, Email (Mailgun), IP detection
 │   │
 │   └── bot/                    # grammY Telegram Bot
 │       └── src/

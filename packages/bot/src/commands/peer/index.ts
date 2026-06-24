@@ -11,3 +11,4 @@ export * from './api';
 export * from './prompts';
 export * from './ui';
 export * from './handlers';
+export * from './infoCollect';

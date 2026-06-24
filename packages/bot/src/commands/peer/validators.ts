@@ -5,6 +5,54 @@
  */
 
 /**
+ * Normalize ASN input with shorthand expansion.
+ *
+ * Supports multiple input formats:
+ *   - Full ASN: "4242420998" → 4242420998
+ *   - With prefix: "AS4242420998" → 4242420998
+ *   - Shorthand (≤4 digits): "0998" or "998" → 4242420998
+ *   - Shorthand with prefix: "AS998" → 4242420998
+ *
+ * Args:
+ *   input: Raw ASN string from user input.
+ *
+ * Returns:
+ *   Parsed ASN as number. Returns NaN for invalid input.
+ */
+export function normalizeAsn(input: string): number {
+    const stripped = input.trim().replace(/^AS/i, '');
+
+    if (!/^\d+$/.test(stripped)) {
+        return NaN;
+    }
+
+    const num = parseInt(stripped, 10);
+
+    // Shorthand: 1-4 digits → prefix with 424242
+    if (stripped.length <= 4) {
+        return 4242420000 + num;
+    }
+
+    return num;
+}
+
+/**
+ * Check if input looks like an ASN (digits only, with optional AS prefix).
+ *
+ * This is a lightweight format check — does NOT validate range.
+ * Use normalizeAsn() to parse and expand the value.
+ *
+ * Args:
+ *   input: Raw input string to check.
+ *
+ * Returns:
+ *   true if input matches ASN format (optional "AS" prefix + digits).
+ */
+export function isAsnInput(input: string): boolean {
+    return /^(AS)?\d+$/i.test(input.trim());
+}
+
+/**
  * Validate IPv6 address (Link-Local or ULA)
  */
 export function isValidIPv6(ip: string): boolean {

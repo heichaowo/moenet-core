@@ -2,8 +2,10 @@ import type { Bot } from 'grammy';
 import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
+import { apiRequest } from '../api';
 import { isChinaIP, resolveEndpoint, CN_REJECTION_MESSAGE } from '../providers/chinaIp';
 import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../services/dn42Validator';
+import { DIVIDER } from '../templates';
 
 // Import from new peer module
 import {
@@ -22,6 +24,8 @@ import {
     isValidMTU,
     isValidPort,
     calculatePort,
+    normalizeAsn,
+    isAsnInput,
     parseMTU,
     parseEndpoint,
     // Helpers
@@ -33,32 +37,23 @@ import {
     truncatePubkey,
     // UI helpers
     showServerWgInfo,
+    promptSessionType,
+    promptIpv6,
+    promptUlaIpv6,
     promptEndpoint,
     promptPubkey,
     promptMtu,
     promptPsk,
     showConfirmation,
+    promptContact,
     // Handlers
     registerCreationHandlers,
     registerConfirmHandlers,
     registerModifyHandlers,
     registerRemoveHandlers,
+    // API
+    submitModifyChanges,
 } from './peer/index';
-
-/**
- * API client for moenet-core
- */
-async function apiRequest(endpoint: string, method = 'POST', body?: unknown, token?: string): Promise<APIResponse> {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : '',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<APIResponse>;
-}
 
 /**
  * Show modify menu with ReplyKeyboard (dn42-bot style)
@@ -75,7 +70,7 @@ async function showModifyMenu(ctx: BotContext, isFirstTime = false) {
     const currentInfo =
         `\`\`\`${isFirstTime ? 'CurrentInfo' : 'ModifiedInfo'}\n` +
         `Region:\n` +
-        `    ${flow.routerName || 'Unknown'}\n` +
+        `    ${flow.routerName || 'Unknown'}${flow.pendingMigration ? ` → ${flow.pendingMigration.nodeName}` : ''}\n` +
         `Basic:\n` +
         `    ASN:         ${flow.asn || ''}\n` +
         `    Channel:     ${channel}\n` +
@@ -85,7 +80,7 @@ async function showModifyMenu(ctx: BotContext, isFirstTime = false) {
         `    Local IPv6:  ${current.localIpv6 || 'Not set'}\n` +
         `    Local IPv4:  ${current.localIpv4 || 'Not set'}\n` +
         `Tunnel:\n` +
-        `    Endpoint:    ${current.endpoint ? `${current.endpoint}:${current.port}` : 'Not set'}\n` +
+        `    Endpoint:    ${current.endpoint ? (current.port ? `${current.endpoint}:${current.port}` : current.endpoint) : 'Not set'}\n` +
         `    PublicKey:   ${current.pubkey ? current.pubkey.slice(0, 20) + '...' : 'Not set'}\n` +
         `    PSK:         ${current.psk ? 'Enabled' : 'Not enabled'}\n` +
         `    MTU:         ${current.mtu || 1420}\n` +
@@ -132,6 +127,34 @@ async function showModifyMenu(ctx: BotContext, isFirstTime = false) {
     );
 }
 
+
+/**
+ * Show BGP Address sub-menu with ReplyKeyboard
+ * Called when user presses Back from a specific BGP address field edit
+ */
+async function showBgpAddressMenu(ctx: BotContext, flow: NonNullable<BotContext['session']['peerFlow']>) {
+    await ctx.reply(
+        '🌐 *BGP Address*\n\n' +
+        `Current:\n` +
+        `• Peer IPv6: \`${flow.current?.ipv6 || 'Not set'}\`\n` +
+        `• Peer IPv4: \`${flow.current?.ipv4 || 'Not set'}\`\n` +
+        `• Local IPv6: \`${flow.current?.localIpv6 || 'Not set'}\`\n` +
+        `• Local IPv4: \`${flow.current?.localIpv4 || 'Not set'}\`\n\n` +
+        'Select which to modify:\n选择要修改的项:',
+        {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                keyboard: [
+                    [{ text: 'Peer IPv6 (对方)' }, { text: 'Peer IPv4 (对方)' }],
+                    [{ text: 'Local IPv6 (我方)' }, { text: 'Local IPv4 (我方)' }],
+                    [{ text: '🔙 Back' }],
+                ],
+                resize_keyboard: true,
+            }
+        }
+    );
+}
+
 export function registerPeerCommands(bot: Bot<BotContext>) {
 
     // Register handlers from extracted modules
@@ -169,58 +192,89 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }, config.apiToken);
 
             if (result.code !== 0 || !result.data?.routers) {
-                await ctx.reply('❌ Failed to fetch nodes.');
+                await ctx.reply('❌ Failed to fetch nodes.\n获取节点列表失败。');
                 return;
             }
 
             const routers = result.data.routers;
 
-            // Build node display with status
-            let nodeListText = '📡 *Node List 节点列表*\n\n';
-            const nodeMap: Record<string, { uuid: string; endpoint: string; pubkey: string; nodeId: number; regionCode: number }> = {};
-            const peerableNodes: string[] = [];
-
-            for (const r of routers) {
-                const label = `${r.name} (${r.region || r.location || 'Unknown'})`;
-                let status = '';
-
-                if (r.isOpen) {
-                    status += '✅ Open ';
-                    peerableNodes.push(label);
-                    nodeMap[label] = {
-                        uuid: r.uuid,
-                        endpoint: r.endpoint || r.name,
-                        pubkey: r.wgPubkey || 'N/A',
-                        nodeId: r.nodeId || 0,
-                        regionCode: r.regionCode || 0,
-                    };
-                } else {
-                    status += '❌ Closed ';
-                }
-
-                if (r.maxPeers && r.maxPeers > 0) {
-                    const current = r.currentPeers || 0;
-                    if (current >= r.maxPeers) {
-                        status += `📊 Full (${current}/${r.maxPeers})`;
-                    } else {
-                        status += `📊 ${current}/${r.maxPeers}`;
-                    }
-                }
-
-                nodeListText += `• \`${label}\` ${status}\n`;
+            if (routers.length === 0) {
+                await ctx.reply('❌ No available nodes.\n没有可用节点');
+                return;
             }
 
-            if (peerableNodes.length === 0) {
+            // Build node list message with detailed info (same style as /addpeer)
+            let msgText = '🛰 *Node List 节点列表*\n\n';
+            const nodeMap: Record<string, { uuid: string; endpoint: string; pubkey: string; nodeId: number; regionCode: number; name: string; allowCnPeers?: boolean }> = {};
+            const couldPeer: string[] = [];
+
+            for (const r of routers.sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))) {
+                // Build label: NAME | City | Provider (same as /addpeer)
+                const nodeName = r.name.toUpperCase();
+                const city = r.location || '';
+                const provider = r.provider || '';
+                const label = provider ? `${nodeName} | ${city} | ${provider}` : `${nodeName} | ${city}`;
+
+                // Status section - multi-line per node (same as /addpeer)
+                let statusLines = `- ${label}\n`;
+
+                if (r.isOpen) {
+                    statusLines += `  🟢 Open For Peer\n`;
+                } else {
+                    statusLines += `  🔴 Closed\n`;
+                }
+
+                // Capacity
+                const current = r.sessionCount || 0;
+                const max = r.maxPeers || 0;
+                if (max > 0) {
+                    statusLines += `  👥 Capacity: ${current} / ${max}\n`;
+                } else {
+                    statusLines += `  👥 Capacity: ${current} / Unlimited\n`;
+                }
+
+                // IPv4/IPv6 support - only show if not supported
+                if (r.supportsIpv4 === false) {
+                    statusLines += `  ⚠️ IPv4: No\n`;
+                }
+                if (r.supportsIpv6 === false) {
+                    statusLines += `  ⚠️ IPv6: No\n`;
+                }
+
+                // CN peer restriction
+                if (r.allowCnPeers === false) {
+                    statusLines += `  🚫 Not allowed to peer with Chinese Mainland\n`;
+                }
+
+                msgText += statusLines + '\n';
+
+                // Add to selectable list if open and has capacity
+                const hasCapacity = max === 0 || current < max;
+                if (r.isOpen && hasCapacity) {
+                    couldPeer.push(label);
+                    nodeMap[label] = {
+                        uuid: r.uuid,
+                        endpoint: r.endpoint || `${r.name}.dn42.moenet.work`,
+                        pubkey: r.wgPublicKey || 'N/A',
+                        nodeId: r.nodeId || 0,
+                        regionCode: r.regionCode || 0,
+                        name: r.name,
+                        allowCnPeers: r.allowCnPeers,
+                    };
+                }
+            }
+
+            if (couldPeer.length === 0) {
                 await ctx.reply(
-                    `${nodeListText}\n❌ No available nodes for peering.\n没有可用节点`,
-                    { parse_mode: 'Markdown' }
+                    `${msgText}\n❌ No available nodes for peering\n当前没有可 Peer 的节点`,
+                    { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
                 );
                 return;
             }
 
             // Auto-select if only one node
-            if (peerableNodes.length === 1) {
-                const selectedLabel = peerableNodes[0] || '';
+            if (couldPeer.length === 1) {
+                const selectedLabel = couldPeer[0] || '';
                 const nodeInfo = nodeMap[selectedLabel];
                 if (!nodeInfo || !selectedLabel) return;
 
@@ -228,8 +282,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
                 ctx.session.peerFlow = {
                     step: 'show_wg_info',
-                    routerName: selectedLabel.split(' (')[0],
-                    routerUuid: nodeInfo.uuid,
+                    routerName: nodeInfo.name,
+                    sessionUuid: nodeInfo.uuid,
                     serverEndpoint: nodeInfo.endpoint,
                     serverPort: userPort,
                     serverPubkey: nodeInfo.pubkey,
@@ -238,7 +292,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 };
 
                 await ctx.reply(
-                    `${nodeListText}\n只有一个可选节点，自动选择 \`${selectedLabel}\``,
+                    `${msgText}\nOnly one node available, auto-selected \`${selectedLabel}\`\n只有一个可选节点，自动选择`,
                     { parse_mode: 'Markdown' }
                 );
 
@@ -247,26 +301,32 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            // Build keyboard for node selection
-            const keyboard = new InlineKeyboard();
-            peerableNodes.forEach((label, i) => {
-                const nodeName = (label || '').split(' (')[0] || '';
-                keyboard.text(nodeName, `peer:node:${label || ''}`);
-                if ((i + 1) % 2 === 0) keyboard.row();
-            });
-
+            // Save nodeMap to session
             ctx.session.peerFlow = {
                 step: 'select_node',
                 nodeMap,
             };
 
+            // Send node list
+            await ctx.reply(msgText, { parse_mode: 'Markdown' });
+
+            // Build ReplyKeyboard with one row per option (same as /addpeer)
+            const keyboard: { text: string }[][] = couldPeer.map(label => [{ text: label }]);
+
+            // Send selection prompt with ReplyKeyboard
             await ctx.reply(
-                `${nodeListText}\n选择节点 / Select node:`,
-                { parse_mode: 'Markdown', reply_markup: keyboard }
+                'Select node:\n选择节点:',
+                {
+                    reply_markup: {
+                        keyboard,
+                        resize_keyboard: true,
+                        one_time_keyboard: true,
+                    }
+                }
             );
         } catch (error) {
             console.error('[Peer] Error:', error);
-            await ctx.reply('❌ Failed to fetch nodes.');
+            await ctx.reply('❌ Failed to fetch nodes.\n获取节点列表失败。');
         }
     });
 
@@ -291,10 +351,187 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        switch (flow.step) {
+        // Guard: intercept abort/finish buttons in modify sub-steps
+        // (modify_menu and modify_confirm handle these themselves)
+        if (flow.step?.startsWith('modify_') && flow.step !== 'modify_menu' && flow.step !== 'modify_confirm') {
+            if (isAbortButton(text) || text === '/cancel') {
+                ctx.session.peerFlow = undefined;
+                await ctx.reply(
+                    'Abort modification, operation has been canceled.\n放弃修改，操作已取消。',
+                    { reply_markup: { remove_keyboard: true } }
+                );
+                return;
+            }
+            if (isFinishButton(text)) {
+                // Redirect to modify_menu's finish handler
+                ctx.session.peerFlow = { ...flow, step: 'modify_menu' };
+                // Fall through to switch — modify_menu will handle finish
+            }
+        }
+
+        switch (ctx.session.peerFlow?.step || flow.step) {
+            // ===== Creation wizard ReplyKeyboard handlers =====
+            case 'select_node': {
+                // Skip admin mode - handled by admin.ts
+                if (flow.isAdminMode) {
+                    return next();
+                }
+                // Handle node selection from ReplyKeyboard
+                const nodeMap = flow.nodeMap;
+                if (!nodeMap) {
+                    await ctx.reply('❌ Error: Node map not found', { reply_markup: { remove_keyboard: true } });
+                    ctx.session.peerFlow = undefined;
+                    return;
+                }
+
+                // Match by exact label (keyboard sends full label)
+                const nodeInfo = nodeMap[text];
+
+                if (!nodeInfo) {
+                    await ctx.reply('❌ Invalid node. Please select from the list.\n无效节点，请从列表中选择。', { reply_markup: { remove_keyboard: true } });
+                    return;
+                }
+
+                const asn = ctx.session.asn || 0;
+                const userPort = calculatePort(asn);
+
+                ctx.session.peerFlow = {
+                    ...flow,
+                    step: 'await_continue',
+                    routerName: nodeInfo.name || text.split(' (')[0] || text,
+                    sessionUuid: nodeInfo.uuid,
+                    serverEndpoint: nodeInfo.endpoint,
+                    serverPort: userPort,
+                    serverPubkey: nodeInfo.pubkey,
+                    serverLla: `fe80::998:${nodeInfo.regionCode}:${nodeInfo.nodeId}:1`,
+                    allowCnPeers: nodeInfo.allowCnPeers,
+                };
+
+                await ctx.reply(`✅ Selected: ${ctx.session.peerFlow.routerName}`, { reply_markup: { remove_keyboard: true } });
+                await showServerWgInfo(ctx);
+                return;
+            }
+
+            case 'await_continue': {
+                // Handle "Continue" button from ReplyKeyboard
+                if (text.includes('Continue') || text.includes('继续')) {
+                    await promptSessionType(ctx);
+                    return;
+                }
+                await ctx.reply('Please click the "Continue" button to proceed.\n请点击 "Continue 继续" 按钮继续。');
+                return;
+            }
+
+            case 'select_session_type': {
+                // Handle session type selection from ReplyKeyboard
+                if (text.includes('MP-BGP') || text.includes('ENH')) {
+                    ctx.session.peerFlow = { ...flow, step: 'input_ipv6', sessionType: 'ipv6_only' };
+                    // Use targetAsn for admin mode, session.asn for user mode
+                    const asn = flow.isAdminMode ? (flow.targetAsn || 0) : (ctx.session.asn || 0);
+                    const suggested = `fe80::${asn % 10000}`;
+                    await ctx.reply(`✅ Session Type: *MP-BGP + ENH*`, { parse_mode: 'Markdown' });
+                    await promptIpv6(ctx, suggested);
+                    return;
+                }
+                if (text.includes('ULA') || text.includes('GUA')) {
+                    ctx.session.peerFlow = { ...flow, step: 'input_peer_ipv6_ula', sessionType: 'ipv6_ipv4' };
+                    await ctx.reply(`✅ Session Type: *ULA/GUA Mode*`, { parse_mode: 'Markdown' });
+                    await promptUlaIpv6(ctx);
+                    return;
+                }
+                await ctx.reply('Please select a session type.\n请选择会话类型。');
+                return;
+            }
+
+            case 'input_mtu': {
+                // Handle MTU selection from ReplyKeyboard - use button text exact matches
+                const mtuButtons: Record<string, number> = {
+                    '1420 (默认)': 1420,
+                    '1400': 1400,
+                    '1380': 1380,
+                    '1280': 1280,
+                };
+                let mtu = mtuButtons[text];
+                if (!mtu) {
+                    // Custom MTU input - parse directly
+                    const parsed = parseInt(text, 10);
+                    if (isNaN(parsed) || parsed < 1280 || parsed > 1500) {
+                        await ctx.reply('❌ Invalid MTU. Please enter 1280-1500.\n无效的 MTU，请输入 1280-1500');
+                        return;
+                    }
+                    mtu = parsed;
+                }
+                ctx.session.peerFlow = { ...flow, step: 'input_psk', mtu };
+                await ctx.reply(`✅ MTU: \`${mtu}\``, { parse_mode: 'Markdown' });
+                await promptPsk(ctx);
+                return;
+            }
+
+            case 'input_psk': {
+                // Handle PSK selection from ReplyKeyboard
+                if (text.includes('Auto') || text.includes('Generate') || text.includes('自动')) {
+                    const psk = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64');
+                    ctx.session.peerFlow = { ...flow, step: 'input_contact', psk };
+                    await ctx.reply(
+                        `🔑 *PSK Generated*\n\n\`${psk}\`\n\n` +
+                        `⚠️ Save this key! You need it on your side.\n` +
+                        `请保存此密钥，稍后配置时需要。`,
+                        { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
+                    );
+                    await promptContact(ctx);
+                    return;
+                }
+                if (text.includes('No') || text.includes('不使用')) {
+                    ctx.session.peerFlow = { ...flow, step: 'input_contact', psk: undefined };
+                    await ctx.reply(`✅ PSK: Disabled\nPSK 已禁用`, { reply_markup: { remove_keyboard: true } });
+                    await promptContact(ctx);
+                    return;
+                }
+                await ctx.reply('Please select a PSK option.\n请选择 PSK 选项。');
+                return;
+            }
+
+            case 'input_contact': {
+                // Handle contact selection from ReplyKeyboard
+                if (text.includes('Skip') || text.includes('跳过')) {
+                    ctx.session.peerFlow = { ...flow, step: 'confirm', contact: undefined };
+                    await ctx.reply('⏩ Contact skipped.\n已跳过联系方式。', { reply_markup: { remove_keyboard: true } });
+                    await showConfirmation(ctx);
+                    return;
+                }
+                if (text.includes('Manual') || text.includes('手动')) {
+                    ctx.session.peerFlow = { ...flow, step: 'input_contact_manual' };
+                    await ctx.reply(
+                        `✏️ *Manual Contact Input*\n手动输入联系方式\n\n` +
+                        `Enter your contact info (e-mail, Telegram, etc.):\n` +
+                        `请输入你的联系方式（邮箱、Telegram 等）：`,
+                        { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
+                    );
+                    return;
+                }
+                // User selected a contact from the list
+                const selectedContact = text.trim();
+                ctx.session.peerFlow = { ...flow, step: 'confirm', contact: selectedContact };
+                await ctx.reply(`✅ Contact: \`${selectedContact}\``, { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } });
+                await showConfirmation(ctx);
+                return;
+            }
+
+            case 'input_contact_manual': {
+                const manualContact = text.trim();
+                if (manualContact.length < 3 || manualContact.length > 200) {
+                    await ctx.reply('❌ Contact must be 3-200 characters.\n联系方式长度须为 3-200 个字符。');
+                    return;
+                }
+                ctx.session.peerFlow = { ...flow, step: 'confirm', contact: manualContact };
+                await ctx.reply(`✅ Contact: \`${manualContact}\``, { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } });
+                await showConfirmation(ctx);
+                return;
+            }
+
             // ===== Modify menu handlers (dn42-bot style) =====
             case 'modify_menu': {
-                const uuid = flow.routerUuid;
+                const uuid = flow.sessionUuid;
                 if (!uuid) {
                     ctx.session.peerFlow = undefined;
                     return;
@@ -321,9 +558,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                         return;
                     }
 
-                    // Check if any changes were made
-                    const hasChanges = JSON.stringify(backup) !== JSON.stringify(current);
-                    if (!hasChanges) {
+                    // Check if any changes were made (including pending migration)
+                    const hasFieldChanges = JSON.stringify(backup) !== JSON.stringify(current);
+                    const hasMigration = !!flow.pendingMigration;
+                    if (!hasFieldChanges && !hasMigration) {
                         ctx.session.peerFlow = undefined;
                         await ctx.reply(
                             'No changes detected, operation cancelled.\n未检测到任何变更，操作已取消。',
@@ -335,7 +573,13 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     // Build diff text showing changes
                     const diffLines: string[] = [];
                     diffLines.push('Region:');
-                    diffLines.push(`    ${flow.routerName || 'Unknown'}`);
+                    if (flow.pendingMigration) {
+                        diffLines.push(`    ${flow.routerName || 'Unknown'}`);
+                        diffLines.push('  ->');
+                        diffLines.push(`      ${flow.pendingMigration.nodeName}`);
+                    } else {
+                        diffLines.push(`    ${flow.routerName || 'Unknown'}`);
+                    }
 
                     // Basic section
                     diffLines.push('Basic:');
@@ -399,8 +643,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     diffLines.push('Tunnel:');
 
                     // Endpoint diff
-                    const oldEndpoint = backup.endpoint ? `${backup.endpoint}:${backup.port}` : 'Not set';
-                    const newEndpoint = current.endpoint ? `${current.endpoint}:${current.port}` : 'Not set';
+                    const oldEndpoint = backup.endpoint
+                        ? (backup.port ? `${backup.endpoint}:${backup.port}` : backup.endpoint)
+                        : 'Not set';
+                    const newEndpoint = current.endpoint
+                        ? (current.port ? `${current.endpoint}:${current.port}` : current.endpoint)
+                        : 'Not set';
                     if (oldEndpoint !== newEndpoint) {
                         diffLines.push(`    Endpoint:    ${oldEndpoint}`);
                         diffLines.push('  ->');
@@ -451,12 +699,21 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     }
 
                     ctx.session.peerFlow = { ...flow, step: 'modify_confirm' };
+
+                    // Hybrid confirmation: InlineKeyboard buttons + text "yes" fallback
+                    const confirmKeyboard = new InlineKeyboard()
+                        .text('✅ Confirm 确认', 'modify:submit')
+                        .text('❌ Cancel 取消', 'modify:cancel');
+
                     await ctx.reply(
                         'Please check all your information\n请确认你的信息\n\n' +
                         '```ConfirmInfo\n' + diffLines.join('\n') + '\n```\n\n' +
-                        'Please enter `yes` to confirm. All other inputs cancel.\n' +
-                        '确认无误请输入 `yes`，其他输入表示取消。',
-                        { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
+                        'Click button or type `yes` to confirm.\n' +
+                        '点击按钮或输入 `yes` 确认。',
+                        {
+                            parse_mode: 'Markdown',
+                            reply_markup: confirmKeyboard
+                        }
                     );
                     return;
                 }
@@ -470,20 +727,39 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                             const nodeResult = await apiRequest('/admin', 'POST', { action: 'enumRouters' }, config.apiToken);
                             const nodes = nodeResult.data?.routers;
                             if (nodeResult.code === 0 && Array.isArray(nodes)) {
+                                // Check if user's current endpoint is a China IP
+                                let userIsChinaIp = false;
+                                const userEndpoint = flow.current?.endpoint as string | undefined;
+                                if (userEndpoint) {
+                                    try {
+                                        const host = userEndpoint.split(':')[0] || userEndpoint;
+                                        const ip = await resolveEndpoint(host);
+                                        if (ip && isChinaIP(ip)) userIsChinaIp = true;
+                                    } catch { /* ignore resolve errors */ }
+                                }
+
                                 const nodeButtons: { text: string }[][] = [];
-                                for (const node of nodes) {
-                                    if (node.isOpen !== false && node.uuid !== flow.routerUuid) {
-                                        nodeButtons.push([{ text: `📍 ${node.name} (${node.location || 'Unknown'})` }]);
-                                    }
+                                for (const node of [...nodes].sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))) {
+                                    // Skip current node, closed nodes, and CN-restricted nodes for CN users
+                                    if (node.isOpen === false) continue;
+                                    if (node.uuid === flow.sessionUuid) continue;
+                                    if (userIsChinaIp && node.allowCnPeers === false) continue;
+                                    nodeButtons.push([{ text: `📍 ${node.name} (${node.location || 'Unknown'})` }]);
                                 }
                                 nodeButtons.push([{ text: '🔙 Back' }]);
 
                                 // Set step for selection
                                 ctx.session.peerFlow = { ...flow, step: 'modify_region' };
 
+                                let warning = '';
+                                if (userIsChinaIp) {
+                                    warning = '\n⚠️ Nodes that block CN IPs are hidden.\n不允许中国大陆 IP 的节点已隐藏。\n';
+                                }
+
                                 await ctx.reply(
                                     '🌍 *Migrate to Another Node*\n迁移到另一节点\n\n' +
-                                    '⚠️ This will recreate your peer.\n这将重建你的 Peer。\n\n' +
+                                    '⚠️ This will recreate your peer.\n这将重建你的 Peer。\n' +
+                                    warning + '\n' +
                                     'Select new node:\n选择新节点:',
                                     { parse_mode: 'Markdown', reply_markup: { keyboard: nodeButtons, resize_keyboard: true } }
                                 );
@@ -589,7 +865,16 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                             '📡 *Modify Endpoint*\n\n' +
                             'Enter new endpoint (host:port) or "none":\n' +
                             '输入新端点 (域名:端口) 或 "none":',
-                            { parse_mode: 'Markdown' }
+                            {
+                                parse_mode: 'Markdown',
+                                reply_markup: {
+                                    keyboard: [
+                                        [{ text: 'None (NAT)' }],
+                                        [{ text: '🔙 Back' }],
+                                    ],
+                                    resize_keyboard: true,
+                                }
+                            }
                         );
                         return;
                     }
@@ -600,7 +885,13 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                             '🔑 *Modify Public Key*\n\n' +
                             'Enter new WireGuard public key:\n' +
                             '输入新的 WireGuard 公钥:',
-                            { parse_mode: 'Markdown' }
+                            {
+                                parse_mode: 'Markdown',
+                                reply_markup: {
+                                    keyboard: [[{ text: '🔙 Back' }]],
+                                    resize_keyboard: true,
+                                }
+                            }
                         );
                         return;
                     }
@@ -612,7 +903,13 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                             'Enter new contact info:\n' +
                             '输入新的联系方式:\n\n' +
                             'Example: Telegram @username, Email, etc.',
-                            { parse_mode: 'Markdown' }
+                            {
+                                parse_mode: 'Markdown',
+                                reply_markup: {
+                                    keyboard: [[{ text: '🔙 Back' }]],
+                                    resize_keyboard: true,
+                                }
+                            }
                         );
                         return;
                     }
@@ -631,56 +928,46 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 }
 
                 // Submit all changes to API
-                const uuid = flow.routerUuid;
-                const current = flow.current;
-                if (!uuid || !current) {
+                if (!flow.sessionUuid || !flow.current) {
                     ctx.session.peerFlow = undefined;
-                    await ctx.reply('❌ Error: No session data');
+                    await ctx.reply('❌ Error: No session data\n错误：缺少会话数据');
                     return;
                 }
 
                 try {
-                    const backup = flow.backup;
+                    const result = await submitModifyChanges(flow);
 
-                    // Only include fields that actually changed
-                    const requestBody: Record<string, unknown> = {
-                        action: 'updateSession',
-                        uuid,
-                    };
-
-                    // Compare and add only changed fields
-                    if (current.ipv6 !== backup?.ipv6) {
-                        requestBody.ipv6 = current.ipv6 || null;
-                    }
-                    if (current.ipv4 !== backup?.ipv4) {
-                        requestBody.ipv4 = current.ipv4 || null;
-                    }
-                    if (current.localIpv6 !== backup?.localIpv6) {
-                        requestBody.ipv6LinkLocal = current.localIpv6 || null;
-                    }
-                    if (current.localIpv4 !== backup?.localIpv4) {
-                        requestBody.localIpv4 = current.localIpv4 || null;
-                    }
-                    if (current.endpoint !== backup?.endpoint) {
-                        requestBody.endpoint = current.endpoint || null;
-                    }
-                    if (current.mtu !== backup?.mtu) {
-                        requestBody.mtu = current.mtu;
-                    }
-                    if (current.contact !== backup?.contact) {
-                        requestBody.contact = current.contact || null;
+                    if (!result.success) {
+                        await ctx.reply(`❌ ${result.message}`, { reply_markup: { remove_keyboard: true } });
+                        ctx.session.peerFlow = undefined;
+                        return;
                     }
 
-                    // Build extensions string only if session type changed
-                    if (current.mpbgp !== backup?.mpbgp || current.extendedNexthop !== backup?.extendedNexthop) {
-                        requestBody.extensions = (current.mpbgp ? 'mp_bgp' : '') + (current.extendedNexthop ? ',extended_nexthop' : '');
-                    }
-                    console.log('[modify_confirm] Request body:', JSON.stringify(requestBody));
-                    const result = await apiRequest('/admin', 'POST', requestBody, config.apiToken);
-                    console.log('[modify_confirm] Response:', JSON.stringify(result));
+                    if (result.migrated) {
+                        await ctx.reply(
+                            `✅ *Changes submitted \& migration initiated!*\n` +
+                            `修改已提交，迁移已启动！\n\n` +
+                            `From: \`${flow.routerName}\` → To: \`${flow.pendingMigration!.nodeName}\`\n\n` +
+                            `⏳ Peer is being recreated on the new node.\n` +
+                            `Peer 正在新节点上重建。\n\n` +
+                            `You will be notified when it's ready.\n` +
+                            `就绪后会通知你。\n\n` +
+                            `Use \`/info\` to check your new WG config.\n` +
+                            `使用 \`/info\` 查看新的 WG 配置信息。`,
+                            { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
+                        );
 
-                    if (result.code !== 0) {
-                        await ctx.reply(`❌ Failed: ${result.message}`);
+                        // Store deferred migration notification
+                        const asn = flow.isAdminMode ? flow.targetAsn : ctx.session.asn;
+                        if (asn) {
+                            await apiRequest('/admin', 'POST', {
+                                action: 'storeMigrationNotify',
+                                asns: [asn],
+                                fromRouter: flow.routerName || 'Unknown',
+                                toRouter: flow.pendingMigration!.nodeName,
+                                adminChatId: undefined, // Self-service, no admin chat
+                            }, config.apiToken);
+                        }
                     } else {
                         await ctx.reply(
                             `✅ Modification submitted successfully!\n` +
@@ -688,12 +975,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                             `Node: \`${flow.routerName}\`\n` +
                             `Changes will be applied within a few minutes.\n` +
                             `更改将在几分钟内生效。`,
-                            { parse_mode: 'Markdown' }
+                            { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
                         );
                     }
                 } catch (error) {
                     console.error('[modify_confirm] Error:', error);
-                    await ctx.reply(`❌ Failed to submit changes: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    await ctx.reply(`❌ Failed to submit changes: ${error instanceof Error ? error.message : 'Unknown error'}`, { reply_markup: { remove_keyboard: true } });
                 }
                 ctx.session.peerFlow = undefined;
                 return;
@@ -710,7 +997,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 // Parse node selection (format: "📍 nodeName (location)")
                 const nodeMatch = text.match(/📍\s*(.+?)\s*\(/);
                 if (!nodeMatch) {
-                    await ctx.reply('❌ Invalid selection. Please choose from the menu.');
+                    await ctx.reply('❌ Invalid selection. Please choose from the menu.\n无效选项，请从菜单中选择。');
                     return;
                 }
 
@@ -723,19 +1010,29 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     const targetNode = nodes.find((n: { name: string }) => n.name === selectedNodeName);
 
                     if (!targetNode) {
-                        await ctx.reply('❌ Node not found. Please try again.');
+                        await ctx.reply('❌ Node not found. Please try again.\n未找到节点，请重试。');
                         return;
                     }
 
-                    // Migration is complex - for now just update the router info
+                    // Store pending migration (will execute on confirm)
+                    ctx.session.peerFlow = {
+                        ...flow,
+                        step: 'modify_menu',
+                        pendingMigration: {
+                            nodeUuid: targetNode.uuid,
+                            nodeName: selectedNodeName,
+                        },
+                    };
+
                     await ctx.reply(
-                        `⚠️ Node migration to \`${selectedNodeName}\` requires manual operation.\n` +
-                        `节点迁移到 \`${selectedNodeName}\` 需要手动操作。\n\n` +
-                        `Please contact admin for node migration.`,
-                        { parse_mode: 'Markdown' }
+                        `✅ Region change queued: → \`${selectedNodeName}\`\n` +
+                        `区域变更已暂存: → \`${selectedNodeName}\`\n\n` +
+                        `⚠️ Migration will execute after you confirm all changes.\n` +
+                        `迁移将在你确认所有更改后执行。`,
+                        { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
                     );
                 } catch {
-                    await ctx.reply('❌ Failed to fetch node info');
+                    await ctx.reply('❌ Failed to fetch node info\n获取节点信息失败');
                 }
 
                 await showModifyMenu(ctx);
@@ -767,7 +1064,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     current.extendedNexthop = false;
                     await ctx.reply('✅ Session type updated: IPv6 + IPv4 (独立会话)\n会话类型已更新');
                 } else {
-                    await ctx.reply('❌ Invalid selection');
+                    await ctx.reply('❌ Invalid selection\n无效选项');
                     return;
                 }
 
@@ -830,7 +1127,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                         { parse_mode: 'Markdown' }
                     );
                 } else {
-                    await ctx.reply('❌ Invalid selection');
+                    await ctx.reply('❌ Invalid selection\n无效选项');
                 }
                 return;
             }
@@ -864,7 +1161,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     ctx.session.peerFlow = { ...flow, current };
                     await ctx.reply('✅ PSK disabled\nPSK 已禁用');
                 } else {
-                    await ctx.reply('❌ Invalid selection');
+                    await ctx.reply('❌ Invalid selection\n无效选项');
                     return;
                 }
 
@@ -875,7 +1172,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             case 'input_ipv6': {
                 const ipv6 = text.includes('/') ? text.split('/')[0] : text;
                 if (!isValidIPv6(ipv6 || '')) {
-                    await ctx.reply('❌ Invalid IPv6 address. Please try again.');
+                    await ctx.reply('❌ Invalid IPv6 address. Please try again.\n无效的 IPv6 地址，请重试。');
                     return;
                 }
                 ctx.session.peerFlow = { ...flow, step: 'input_endpoint', ipv6 };
@@ -902,8 +1199,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     return;
                 }
 
-                // Validate IP ownership
-                const asn = ctx.session.asn || 0;
+                // Validate IP ownership (use targetAsn for admin mode)
+                const asn = flow.isAdminMode ? (flow.targetAsn || 0) : (ctx.session.asn || 0);
                 const validation = await validateIpOwnership(asn, ipv6 || '');
                 if (!validation.valid && validation.warning) {
                     await ctx.reply(validation.warning);
@@ -937,8 +1234,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     return;
                 }
 
-                // Validate IP ownership
-                const asn = ctx.session.asn || 0;
+                // Validate IP ownership (use targetAsn for admin mode)
+                const asn = flow.isAdminMode ? (flow.targetAsn || 0) : (ctx.session.asn || 0);
                 const validation = await validateIpOwnership(asn, localIpv6 || '');
                 if (!validation.valid && validation.warning) {
                     await ctx.reply(validation.warning);
@@ -969,8 +1266,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     return;
                 }
 
-                // Validate IP ownership
-                const asn = ctx.session.asn || 0;
+                // Validate IP ownership (use targetAsn for admin mode)
+                const asn = flow.isAdminMode ? (flow.targetAsn || 0) : (ctx.session.asn || 0);
                 const validation = await validateIpOwnership(asn, ipv4);
                 if (!validation.valid && validation.warning) {
                     await ctx.reply(validation.warning);
@@ -997,8 +1294,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     return;
                 }
 
-                // Validate IP ownership
-                const asn = ctx.session.asn || 0;
+                // Validate IP ownership (use targetAsn for admin mode)
+                const asn = flow.isAdminMode ? (flow.targetAsn || 0) : (ctx.session.asn || 0);
                 const validation = await validateIpOwnership(asn, localIpv4);
                 if (!validation.valid && validation.warning) {
                     await ctx.reply(validation.warning);
@@ -1023,7 +1320,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 let port: number | undefined;
 
                 // Parse port from endpoint
-                if (text.toLowerCase() === 'none') {
+                if (text.toLowerCase() === 'none' || text.includes('NAT')) {
                     endpoint = '';
                 } else if (text.includes(':') && !text.includes('::')) {
                     // IPv4:port or domain:port
@@ -1047,12 +1344,23 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     try {
                         const ip = await resolveEndpoint(endpoint);
                         if (ip && isChinaIP(ip)) {
+                            // Per-node CN restriction: block if node disallows CN peers
+                            if (flow.allowCnPeers === false) {
+                                await ctx.reply(
+                                    '❌ *China Mainland IP Blocked*\n中国大陆 IP 已拦截\n\n' +
+                                    `The selected node \`${flow.routerName}\` does not allow peering with Chinese Mainland IPs.\n` +
+                                    `所选节点 \`${flow.routerName}\` 不允许中国大陆 IP 进行 Peer。\n\n` +
+                                    'Please choose a different endpoint or select another node.\n' +
+                                    '请更换端点或选择其他节点。',
+                                    { parse_mode: 'Markdown' }
+                                );
+                                return;
+                            }
+                            // Node allows CN peers — warn only
                             await ctx.reply(CN_REJECTION_MESSAGE);
-                            return;
                         }
                     } catch (e) {
                         console.warn('[Peer] Failed to check China IP:', e);
-                        // Continue anyway - don't block on check failure
                     }
                 }
 
@@ -1109,13 +1417,115 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'confirm': {
-                // Text during confirm step - ignore, they should use buttons
-                await ctx.reply('Please use the buttons above to confirm or cancel.\n请使用上方按钮确认或取消');
+                // Hybrid confirmation: support both InlineKeyboard button AND text "yes"
+                if (text.toLowerCase() === 'yes') {
+                    // Trigger confirmation logic (same as peer:confirm callback)
+                    const asn = flow.isAdminMode ? flow.targetAsn : ctx.session.asn;
+                    if (!asn) {
+                        ctx.session.peerFlow = undefined;
+                        return;
+                    }
+
+                    await ctx.reply('⏳ Creating peer...\n正在创建 Peer...');
+
+                    try {
+                        const action = flow.isAdminMode ? 'adminCreate' : 'create';
+                        const result = await apiRequest('/admin', 'POST', {
+                            action,
+                            asn,
+                            router: flow.sessionUuid,
+                            ipv6: flow.ipv6,
+                            endpoint: flow.endpoint && flow.port ? `${flow.endpoint}:${flow.port}` : undefined,
+                            publicKey: flow.publicKey,
+                            mtu: flow.mtu || 1420,
+                            psk: flow.psk,
+                            status: flow.isAdminMode ? 1 : undefined,
+                        }, config.apiToken);
+
+                        if (result.code !== 0) {
+                            await ctx.reply(`❌ Failed to create peer: ${result.message}`);
+                            ctx.session.peerFlow = undefined;
+                            return;
+                        }
+
+                        const sessionUuid = result.data?.uuid || '';
+
+                        const statusText = flow.isAdminMode
+                            ? `✅ Status: ACTIVE (免审核)`
+                            : `⏳ Status: Pending Review\n等待管理员审核`;
+
+                        const successText =
+                            `🎉 *Peer Created Successfully!*\n成功创建 Peer!\n\n` +
+                            `📍 Node: \`${flow.routerName}\`\n` +
+                            `🆔 ASN: \`AS${asn}\`\n\n` +
+                            `*Your WireGuard Config:*\n` +
+                            `\`\`\`\n` +
+                            `[Peer]\n` +
+                            `PublicKey = ${flow.serverPubkey}\n` +
+                            `Endpoint = ${flow.serverEndpoint}:${flow.serverPort}\n` +
+                            `AllowedIPs = 172.20.0.0/14, 172.31.0.0/16, fd00::/8, fe80::/64\n` +
+                            `\`\`\`\n\n` +
+                            statusText;
+
+                        await ctx.reply(successText, { parse_mode: 'Markdown' });
+
+                        // Notify admin if not in admin mode (with retry for reliability)
+                        if (!flow.isAdminMode && config.adminChatId) {
+                            const adminNotification =
+                                `🔔 *New Peer Request*\n新的 Peer 申请\n\n` +
+                                `🆔 ASN: \`AS${asn}\`\n` +
+                                `📍 Node: \`${flow.routerName}\`\n` +
+                                `🌐 IPv6: \`${flow.ipv6}\`\n` +
+                                `📡 Endpoint: ${flow.endpoint ? `\`${flow.endpoint}:${flow.port}\`` : 'NAT'}\n` +
+                                (flow.contact ? `📞 Contact: \`${flow.contact}\`\n` : '') +
+                                `\nUse /pending to review all`;
+
+                            const keyboard = new InlineKeyboard()
+                                .text('✅ Approve', `approve:${sessionUuid}`)
+                                .text('❌ Reject', `reject:${sessionUuid}`)
+                                .row()
+                                .text('📋 All Pending', 'admin:pending');
+
+                            for (let attempt = 1; attempt <= 3; attempt++) {
+                                try {
+                                    await ctx.api.sendMessage(config.adminChatId, adminNotification, {
+                                        parse_mode: 'Markdown',
+                                        reply_markup: keyboard,
+                                    });
+                                    break;
+                                } catch (e) {
+                                    console.error(`[Notify Admin] Attempt ${attempt}/3 failed:`, e);
+                                    if (attempt < 3) {
+                                        await new Promise(r => setTimeout(r, attempt * 2000));
+                                    }
+                                }
+                            }
+                        }
+
+                        ctx.session.peerFlow = undefined;
+                    } catch (error) {
+                        console.error('[Peer] Create error:', error);
+                        await ctx.reply('❌ Failed to create peer.');
+                        ctx.session.peerFlow = undefined;
+                    }
+                    return;
+                }
+
+                // Other text during confirm step - remind about options
+                await ctx.reply(
+                    'Please use the buttons above OR type `yes` to confirm.\n' +
+                    '请使用上方按钮或输入 `yes` 确认',
+                    { parse_mode: 'Markdown' }
+                );
                 break;
             }
 
             // Modify handlers
             case 'modify_ipv6': {
+                if (isBackButton(text)) {
+                    await showModifyMenu(ctx);
+                    return;
+                }
                 const ipv6 = text.includes('/') ? text.split('/')[0] : text;
                 if (!isValidIPv6(ipv6 || '')) {
                     await ctx.reply('❌ Invalid IPv6 address. Please try again.');
@@ -1125,7 +1535,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 try {
                     const result = await apiRequest('/admin', 'POST', {
                         action: 'updateSession',
-                        uuid: flow.routerUuid,
+                        uuid: flow.sessionUuid,
                         ipv6,
                     }, config.apiToken);
 
@@ -1142,6 +1552,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'modify_endpoint': {
+                if (isBackButton(text)) {
+                    await showModifyMenu(ctx);
+                    return;
+                }
                 const current = flow.current;
                 if (!current) {
                     await showModifyMenu(ctx);
@@ -1181,6 +1595,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'modify_pubkey': {
+                if (isBackButton(text)) {
+                    await showModifyMenu(ctx);
+                    return;
+                }
                 if (!isValidWgPubkey(text)) {
                     await ctx.reply('❌ Invalid public key. Should be 44 chars ending with =');
                     return;
@@ -1233,6 +1651,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
             // New field handlers
             case 'modify_peerIpv6': {
+                if (isBackButton(text)) {
+                    ctx.session.peerFlow = { ...flow, step: 'modify_bgp_address' };
+                    await showBgpAddressMenu(ctx, flow);
+                    return;
+                }
                 // Validate IPv6 format
                 const ipv6 = text.trim();
                 if (!/^(fe80:|fd[0-9a-f]{2}:|fc[0-9a-f]{2}:)/i.test(ipv6)) {
@@ -1255,6 +1678,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'modify_peerIpv4': {
+                if (isBackButton(text)) {
+                    ctx.session.peerFlow = { ...flow, step: 'modify_bgp_address' };
+                    await showBgpAddressMenu(ctx, flow);
+                    return;
+                }
                 const ipv4 = text.trim().toLowerCase();
                 if (ipv4 !== 'none' && !/^172\.(2[0-3]|1[6-9])\./.test(ipv4)) {
                     await ctx.reply('❌ Invalid DN42 IPv4. Use 172.20.x.x - 172.23.x.x or "none"');
@@ -1277,6 +1705,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'modify_localIpv6': {
+                if (isBackButton(text)) {
+                    ctx.session.peerFlow = { ...flow, step: 'modify_bgp_address' };
+                    await showBgpAddressMenu(ctx, flow);
+                    return;
+                }
                 const ipv6 = text.trim();
                 if (!/^(fe80:|fd[0-9a-f]{2}:|fc[0-9a-f]{2}:)/i.test(ipv6)) {
                     await ctx.reply('❌ Invalid IPv6. Use Link-Local (fe80::) or ULA (fd00::/fc00::)');
@@ -1298,6 +1731,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'modify_localIpv4': {
+                if (isBackButton(text)) {
+                    ctx.session.peerFlow = { ...flow, step: 'modify_bgp_address' };
+                    await showBgpAddressMenu(ctx, flow);
+                    return;
+                }
                 const ipv4 = text.trim().toLowerCase();
                 if (ipv4 !== 'none' && !/^172\.(2[0-3]|1[6-9])\./.test(ipv4)) {
                     await ctx.reply('❌ Invalid DN42 IPv4. Use 172.20.x.x - 172.23.x.x or "none"');
@@ -1320,6 +1758,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             }
 
             case 'modify_contact': {
+                if (isBackButton(text)) {
+                    await showModifyMenu(ctx);
+                    return;
+                }
                 const contact = text.trim();
                 if (contact.length < 3 || contact.length > 200) {
                     await ctx.reply('❌ Contact must be 3-200 characters');
@@ -1340,6 +1782,71 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
+            // Remove confirmation: random code verification
+            case 'remove_confirm': {
+                const expectedCode = flow.removeCode;
+                if (!expectedCode) {
+                    ctx.session.peerFlow = undefined;
+                    await ctx.reply('❌ Error: No confirmation code. Please retry /remove');
+                    return;
+                }
+
+                if (text.toLowerCase() === expectedCode.toLowerCase()) {
+                    const uuid = flow.sessionUuid;
+                    if (!uuid) {
+                        ctx.session.peerFlow = undefined;
+                        await ctx.reply('❌ Error: No session to remove');
+                        return;
+                    }
+
+                    await ctx.reply('⏳ Removing peer...\n正在删除 Peer...');
+
+                    try {
+                        const result = await apiRequest('/admin', 'POST', {
+                            action: 'deleteSession',
+                            uuid,
+                        }, config.apiToken);
+
+                        if (result.code !== 0) {
+                            await ctx.reply(`❌ Failed to remove: ${result.message}`);
+                        } else {
+                            await ctx.reply('✅ Peer removed successfully!\n成功删除 Peer!');
+
+                            // Notify admin about peer removal
+                            if (config.adminChatId) {
+                                try {
+                                    const asn = ctx.session.asn || 0;
+                                    const username = ctx.from?.username ? `@${ctx.from.username}` : `ID:${ctx.from?.id}`;
+                                    await ctx.api.sendMessage(config.adminChatId,
+                                        `🗑️ *Peer Removed*\n\n` +
+                                        `🆔 ASN: \`AS${asn}\`\n` +
+                                        `📍 Node: \`${flow.routerName || 'Unknown'}\`\n` +
+                                        `👤 By: ${username}`,
+                                        { parse_mode: 'Markdown' }
+                                    );
+                                } catch {
+                                    // Non-critical: don't fail if admin notification fails
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        console.error('[Remove] Text confirm error:', error);
+                        await ctx.reply('❌ Failed to remove peer.');
+                    }
+
+                    ctx.session.peerFlow = undefined;
+                    return;
+                }
+
+                // Wrong code - remind
+                await ctx.reply(
+                    `❌ Incorrect code. Please type \`${expectedCode}\` to confirm deletion.\n` +
+                    `验证码错误，请输入 \`${expectedCode}\` 确认删除`,
+                    { parse_mode: 'Markdown' }
+                );
+                return;
+            }
+
             default:
                 return next();
         }
@@ -1350,7 +1857,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
      */
     async function showConfirmation(ctx: BotContext) {
         const flow = ctx.session.peerFlow;
-        const asn = ctx.session.asn;
+        // Use targetAsn for admin mode, session.asn for user mode
+        const asn = flow?.isAdminMode ? flow.targetAsn : ctx.session.asn;
         if (!flow || !asn) return;
 
         const endpointDisplay = flow.endpoint && flow.port
@@ -1387,35 +1895,99 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
 
     /**
-     * /info - Show peer info
+     * /info - Show peer info with live WG/BGP status
      */
     bot.command('info', async (ctx) => {
-        // Check if admin specifying ASN
         const args = ctx.match?.trim().split(/\s+/) || [];
-        let targetAsn = ctx.session.asn;
-        let isAdminMode = false;
 
         const username = ctx.from?.username?.toLowerCase();
         const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
         const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
 
-        if (args[0] && /^\d+$/.test(args[0].replace(/^AS/i, ''))) {
+        // Admin with ASN arg → direct lookup
+        if (args[0] && isAsnInput(args[0])) {
             if (!isAdmin) {
                 await ctx.reply('❌ Only admin can view other ASN info\n只有管理员可以查看其他 ASN 的信息');
                 return;
             }
-            targetAsn = parseInt(args[0].replace(/^AS/i, ''), 10);
-            isAdminMode = true;
+            const targetAsn = normalizeAsn(args[0]);
+            await fetchAndDisplayInfo(ctx, targetAsn, true);
+            return;
         }
 
+        // Admin without args → prompt for ASN
+        if (isAdmin && !args[0]) {
+            ctx.session.awaitingInfoAsn = true;
+            const keyboard = new InlineKeyboard()
+                .text('🚫 Cancel 取消', 'info:cancel');
+
+            await ctx.reply(
+                `📊 *Peer Info 查询*\n${DIVIDER}\n` +
+                `Enter ASN to view peer details\n` +
+                `请输入要查看的 ASN\n\n` +
+                `Example 示例: \`998\`, \`0998\`, \`AS4242420998\``,
+                { parse_mode: 'Markdown', reply_markup: keyboard }
+            );
+            return;
+        }
+
+        // Normal user → show own info
+        const targetAsn = ctx.session.asn;
         if (!targetAsn) {
             await ctx.reply('❌ Please /login first.\n请先登录');
             return;
         }
 
+        await fetchAndDisplayInfo(ctx, targetAsn, false);
+    });
+
+    // Handle admin ASN text input for /info
+    bot.on('message:text', async (ctx, next) => {
+        if (!ctx.session.awaitingInfoAsn) {
+            return next();
+        }
+
+        const text = ctx.message.text.trim();
+
+        // If user sends another command, cancel and pass through
+        if (text.startsWith('/')) {
+            ctx.session.awaitingInfoAsn = false;
+            return next();
+        }
+
+        if (!isAsnInput(text)) {
+            await ctx.reply(
+                `❌ Invalid ASN format. Example: 998, 0998, AS4242420998\n` +
+                `无效的 ASN 格式。`
+            );
+            return;
+        }
+
+        ctx.session.awaitingInfoAsn = false;
+        const targetAsn = normalizeAsn(text);
+        await fetchAndDisplayInfo(ctx, targetAsn, true);
+    });
+
+    // Cancel info ASN input
+    bot.callbackQuery('info:cancel', async (ctx) => {
+        ctx.session.awaitingInfoAsn = false;
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText('❌ Cancelled.\n已取消。');
+    });
+
+    /**
+     * Shared: fetch and display peer info for an ASN.
+     *
+     * Args:
+     *   ctx: Bot context.
+     *   targetAsn: The ASN to query.
+     *   useAdminApi: Whether to use admin API with token.
+     */
+    async function fetchAndDisplayInfo(ctx: BotContext, targetAsn: number, useAdminApi: boolean) {
+        await ctx.reply('⏳ Fetching peer info...\n正在获取 Peer 信息...');
+
         try {
-            // Admin mode: use admin API; User mode: use session API
-            const result = isAdminMode
+            const result = useAdminApi
                 ? await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken)
                 : await apiRequest('/session', 'POST', { action: 'list', asn: targetAsn });
 
@@ -1424,16 +1996,66 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            const sessions: Array<{ uuid: string; router: string; status: number; ipv6?: string; endpoint?: string }> = result.data?.sessions || [];
+            const sessions: Array<{ uuid: string; router: string; routerName?: string; status: number; ipv6?: string; endpoint?: string; serverEndpoint?: string; serverWgKey?: string }> = result.data?.sessions || [];
 
             if (sessions.length === 0) {
                 await ctx.reply(
                     `📊 *Peer Info for AS${targetAsn}*\n\n` +
                     `No peers found.\n没有 Peer\n\n` +
-                    `Use /peer to create one.`,
+                    `Use /peer to create one.\n使用 /peer 创建。`,
                     { parse_mode: 'Markdown' }
                 );
                 return;
+            }
+
+            // Fetch live status from agents in parallel for active sessions
+            const { getAgentEndpoint } = await import('../providers/nodes');
+            type LiveStatus = {
+                bgp_status?: string;
+                wg_status?: string;
+                last_handshake?: string;
+                transfer?: { rx: string; tx: string };
+                routes_imported?: number;
+                routes_exported?: number;
+                uptime?: string;
+            };
+            const liveStatusMap = new Map<string, LiveStatus | null>();
+
+            const activeSessions = sessions.filter(s => s.status === 1);
+            if (activeSessions.length > 0) {
+                const fetchPromises = activeSessions.map(async (s) => {
+                    const router = s.routerName || s.router;
+                    try {
+                        const agentUrl = await getAgentEndpoint(router);
+                        if (!agentUrl) return { router, status: null };
+
+                        const peerName = `dn42_${targetAsn}`;
+                        const controller = new AbortController();
+                        const timeout = setTimeout(() => controller.abort(), 5000);
+
+                        const resp = await fetch(`${agentUrl}/peer/${peerName}`, {
+                            method: 'GET',
+                            headers: { 'Authorization': `Bearer ${config.agentToken || ''}` },
+                            signal: controller.signal,
+                        });
+                        clearTimeout(timeout);
+
+                        if (resp.ok) {
+                            const data = await resp.json() as LiveStatus;
+                            return { router, status: data };
+                        }
+                        return { router, status: null };
+                    } catch {
+                        return { router, status: null };
+                    }
+                });
+
+                const results = await Promise.allSettled(fetchPromises);
+                for (const r of results) {
+                    if (r.status === 'fulfilled' && r.value) {
+                        liveStatusMap.set(r.value.router, r.value.status);
+                    }
+                }
             }
 
             let message = `📊 *Peer Info for AS${targetAsn}*\n\n`;
@@ -1441,33 +2063,70 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             for (const [i, s] of sessions.entries()) {
                 const statusIcon = s.status === 1 ? '🟢' : s.status === 3 ? '⏳' : '❌';
                 const statusText = s.status === 1 ? 'Active' : s.status === 3 ? 'Pending' : 'Inactive';
+                const displayName = s.routerName || s.router;
 
-                message += `*${i + 1}. ${s.router}* ${statusIcon} ${statusText}\n`;
+                message += `*${i + 1}. ${displayName}* ${statusIcon} ${statusText}\n`;
 
                 if (s.ipv6) message += `   IPv6: \`${s.ipv6}\`\n`;
-                if (s.endpoint) message += `   Endpoint: \`${s.endpoint}\`\n`;
+                if (s.endpoint) message += `   ${useAdminApi ? 'Peer' : 'Your'} Endpoint: \`${s.endpoint}\`\n`;
+                if (s.serverEndpoint) message += `   🖥️ Server Endpoint: \`${s.serverEndpoint}\`\n`;
+                if (s.serverWgKey) message += `   🔑 Server Key: \`${s.serverWgKey.slice(0, 10)}...\`\n`;
+
+                // Live status from agent
+                if (s.status === 1) {
+                    const live = liveStatusMap.get(displayName);
+                    if (live) {
+                        // BGP status
+                        const bgpIcon = live.bgp_status === 'Established' ? '✅' : '⚠️';
+                        const routeInfo = (live.routes_imported !== undefined && live.routes_exported !== undefined)
+                            ? ` (${live.routes_imported}↓ ${live.routes_exported}↑)`
+                            : '';
+                        message += `   BGP: ${bgpIcon} ${live.bgp_status || 'unknown'}${routeInfo}\n`;
+
+                        // WG handshake
+                        if (live.last_handshake && live.last_handshake !== 'never') {
+                            message += `   WG:  ✅ Handshake ${live.last_handshake}\n`;
+                        } else if (live.last_handshake === 'never') {
+                            message += `   WG:  ❌ No handshake\n`;
+                        }
+
+                        // Transfer
+                        if (live.transfer) {
+                            message += `   Transfer: ↓${live.transfer.rx} ↑${live.transfer.tx}\n`;
+                        }
+                    } else {
+                        message += `   ⚠️ Agent unreachable\n`;
+                    }
+                }
+
                 message += `\n`;
             }
 
             const keyboard = new InlineKeyboard()
-                .text('🔄 Check Status', 'info:status')
-                .text('🔧 Modify', 'info:modify');
+                .text('🔄 Refresh 刷新', `info:refresh:${targetAsn}`)
+                .text('🔧 Modify 修改', 'info:modify');
 
             await ctx.reply(message, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (error) {
             console.error('[Info] Error:', error);
-            await ctx.reply('❌ Failed to fetch peer info.');
+            await ctx.reply('❌ Failed to fetch peer info.\n获取 Peer 信息失败。');
         }
-    });
+    }
 
-    // Handle info:status and info:modify callbacks
-    bot.callbackQuery('info:status', async (ctx) => {
-        await ctx.answerCallbackQuery('Use /status command');
-        await ctx.reply('Use /status to check WG/BGP status\n使用 /status 查看状态');
+    // Handle info:refresh — re-fetch with the same ASN
+    bot.callbackQuery(/^info:refresh:(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery('Refreshing... 刷新中...');
+        const targetAsn = parseInt(ctx.match[1]!, 10);
+
+        const username = ctx.from?.username?.toLowerCase();
+        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
+        const useAdminApi = username === adminUsername || ctx.session.isAdmin === true;
+
+        await fetchAndDisplayInfo(ctx, targetAsn, useAdminApi);
     });
 
     bot.callbackQuery('info:modify', async (ctx) => {
-        await ctx.answerCallbackQuery('Use /modify command');
+        await ctx.answerCallbackQuery();
         await ctx.reply('Use /modify to modify a peer\n使用 /modify 修改 Peer');
     });
 
@@ -1484,12 +2143,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
         const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
 
-        if (args[0] && /^\d+$/.test(args[0].replace(/^AS/i, ''))) {
+        if (args[0] && isAsnInput(args[0])) {
             if (!isAdmin) {
                 await ctx.reply('❌ Only admin can modify other ASN peers\n只有管理员可以修改其他 ASN 的 Peer');
                 return;
             }
-            targetAsn = parseInt(args[0].replace(/^AS/i, ''), 10);
+            targetAsn = normalizeAsn(args[0]);
             isAdminMode = true;
         }
 
@@ -1517,9 +2176,9 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
             // Build selection keyboard
             const keyboard = new InlineKeyboard();
-            sessions.forEach((s: { uuid: string; router: string; status: number }) => {
-                const statusIcon = s.status === 1 ? '🟢' : s.status === 3 ? '⏳' : '❌';
-                keyboard.text(`${statusIcon} ${s.router}`, `modify:peer:${s.uuid}`).row();
+            sessions.forEach((s: { uuid: string; router: string; routerName?: string; status: number }) => {
+                const displayName = s.routerName || s.router;
+                keyboard.text(displayName, `modify:peer:${s.uuid}`).row();
             });
             keyboard.text('🚫 Cancel 取消', 'modify:cancel');
 
@@ -1565,32 +2224,58 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             // Parse credential for backup
             let pubkey = '';
             let hasPsk = false;
+            let credEndpoint = '';
+            let credListenPort = '';
             if (session.credential) {
                 try {
                     const cred = typeof session.credential === 'string'
                         ? JSON.parse(session.credential)
                         : session.credential;
                     pubkey = cred.pubkey || cred.public_key || '';
-                    hasPsk = !!cred.psk;
+                    hasPsk = !!(cred.preshared_key || cred.psk);
+                    // Extract endpoint from credential if DB endpoint doesn't have port
+                    if (cred.endpoint) {
+                        credEndpoint = cred.endpoint;
+                    }
+                    if (cred.listen_port) {
+                        credListenPort = String(cred.listen_port);
+                    }
                 } catch {
                     pubkey = String(session.credential).slice(0, 44);
                 }
             }
 
-            // Parse extensions
-            const extensions = session.extensions || '';
-            const hasMpbgp = extensions.includes('mp_bgp') || extensions.includes('mpbgp');
-            const hasEnh = extensions.includes('extended_nexthop') || extensions.includes('enh');
+            // Resolve endpoint: prefer DB endpoint, fall back to credential endpoint
+            const rawEndpoint = session.endpoint || credEndpoint || '';
+
+            // Parse host:port from the resolved endpoint
+            let resolvedHost = rawEndpoint;
+            let resolvedPort = '';
+            if (rawEndpoint && rawEndpoint.includes(':')) {
+                const parts = rawEndpoint.split(':');
+                const lastPart = parts[parts.length - 1];
+                // Only treat as port if the last segment is purely numeric
+                if (lastPart && /^\d+$/.test(lastPart)) {
+                    resolvedPort = lastPart;
+                    resolvedHost = parts.slice(0, -1).join(':');
+                }
+            }
+
+            // Parse extensions (handles both JSON array and string format)
+            const rawExt = session.extensions;
+            const extStr = Array.isArray(rawExt) ? rawExt.join(',') : (rawExt || '');
+            const hasMpbgp = extStr.includes('mp_bgp') || extStr.includes('mpbgp');
+            const hasEnh = extStr.includes('extended_nexthop') || extStr.includes('enh');
 
             // Store backup state for diff tracking (dn42-bot style)
             ctx.session.peerFlow = {
                 step: 'modify_menu',
-                routerUuid: uuid,
+                sessionUuid: uuid,
                 routerName: session.routerName || session.router,
                 asn: session.asn,
                 backup: {
-                    endpoint: session.endpoint || '',
-                    port: session.port || '',
+                    endpoint: resolvedHost,
+                    port: resolvedPort,
                     ipv6: session.ipv6 || '',
                     ipv4: session.ipv4 || '',
                     localIpv6: session.ipv6LinkLocal || '',
@@ -1604,8 +2289,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 },
                 // Current values (will be modified by user)
                 current: {
-                    endpoint: session.endpoint || '',
-                    port: session.port || '',
+                    endpoint: resolvedHost,
+                    port: resolvedPort,
                     ipv6: session.ipv6 || '',
                     ipv4: session.ipv4 || '',
                     localIpv6: session.ipv6LinkLocal || '',
@@ -1622,8 +2307,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             // Build current info display
             const channel = hasMpbgp ? 'IPv6 & IPv4' : 'IPv6 only';
             const mpbgpText = hasMpbgp ? (hasEnh ? 'IPv6 (ENH)' : 'IPv6') : 'Not supported';
-            const endpoint = session.endpoint
-                ? (session.port ? `${session.endpoint}:${session.port}` : session.endpoint)
+            const endpointDisplay = resolvedHost
+                ? (resolvedPort ? `${resolvedHost}:${resolvedPort}` : resolvedHost)
                 : 'Not set';
 
             const currentInfo =
@@ -1639,7 +2324,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 `    Local IPv6:  ${session.ipv6LinkLocal || 'Not set'}\n` +
                 `    Local IPv4:  ${session.localIpv4 || 'Not set'}\n` +
                 `Tunnel:\n` +
-                `    Endpoint:    ${endpoint}\n` +
+                `    Endpoint:    ${endpointDisplay}\n` +
                 `    PublicKey:   ${pubkey ? pubkey.slice(0, 20) + '...' : 'Not set'}\n` +
                 `    PSK:         ${hasPsk ? 'Enabled' : 'Not enabled'}\n` +
                 `    MTU:         ${session.mtu || 1420}\n` +
@@ -1700,7 +2385,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         // Store modify state in peerFlow
         ctx.session.peerFlow = {
             step: `modify_${field}`,
-            routerUuid: uuid,
+            sessionUuid: uuid,
         };
 
         let promptText = '';
@@ -1714,12 +2399,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     `Select new node:\n选择新节点:`;
                 // Build node keyboard dynamically
                 try {
-                    const nodeResult = await apiRequest('/node', 'POST', { action: 'list' }, config.apiToken);
-                    const nodes = nodeResult.data?.nodes;
+                    const nodeResult = await apiRequest('/admin', 'POST', { action: 'enumRouters' }, config.apiToken);
+                    const nodes = nodeResult.data?.routers;
                     if (nodeResult.code === 0 && Array.isArray(nodes)) {
                         keyboard = new InlineKeyboard();
                         for (const node of nodes) {
-                            if (node.status === 1) { // Only active nodes
+                            if (node.isOpen) { // Only open nodes
                                 keyboard.text(`📍 ${node.name}`, `modify:region:${uuid}:${node.uuid}`).row();
                             }
                         }
@@ -1855,12 +2540,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
         const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
 
-        if (args[0] && /^\d+$/.test(args[0].replace(/^AS/i, ''))) {
+        if (args[0] && isAsnInput(args[0])) {
             if (!isAdmin) {
                 await ctx.reply('❌ Only admin can remove other ASN peers\n只有管理员可以删除其他 ASN 的 Peer');
                 return;
             }
-            targetAsn = parseInt(args[0].replace(/^AS/i, ''), 10);
+            targetAsn = normalizeAsn(args[0]);
             isAdminMode = true;
         }
 
@@ -1879,7 +2564,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            const sessions = result.data?.sessions || [];
+            const sessions = (result.data?.sessions || [])
+                .filter((s: { status: number }) => s.status !== 5); // Exclude QUEUED_FOR_DELETE
 
             if (sessions.length === 0) {
                 await ctx.reply(`ℹ️ AS${targetAsn} has no peers to remove.\nAS${targetAsn} 没有可删除的 Peer`);
@@ -1888,9 +2574,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
             // Build selection keyboard
             const keyboard = new InlineKeyboard();
-            sessions.forEach((s: { uuid: string; router: string; status: number }) => {
-                const statusIcon = s.status === 1 ? '🟢' : s.status === 3 ? '⏳' : '❌';
-                keyboard.text(`${statusIcon} ${s.router}`, `remove:select:${s.uuid}`).row();
+            sessions.forEach((s: { uuid: string; router: string; routerName?: string; status: number }) => {
+                keyboard.text(`${s.routerName || s.router}`, `remove:select:${s.uuid}`).row();
             });
             keyboard.text('🚫 Cancel 取消', 'remove:cancel');
 
@@ -1922,12 +2607,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
         const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
 
-        if (args[0] && /^\d+$/.test(args[0].replace(/^AS/i, ''))) {
+        if (args[0] && isAsnInput(args[0])) {
             if (!isAdmin) {
                 await ctx.reply('❌ Only admin can restart other ASN peers\n只有管理员可以重启其他 ASN 的 Peer');
                 return;
             }
-            targetAsn = parseInt(args[0].replace(/^AS/i, ''), 10);
+            targetAsn = normalizeAsn(args[0]);
         }
 
         if (!targetAsn) {
@@ -1938,16 +2623,16 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         // Fetch user's active sessions
         try {
             const result = await apiRequest('/admin', 'POST', {
-                action: 'list',
+                action: 'enumSessions',
                 asn: targetAsn,
-            });
+            }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.reply(`❌ Error: ${result.message}`);
                 return;
             }
 
-            const sessions = (result.data?.sessions || []).filter(s => s.status === 1);
+            const sessions = (result.data?.sessions || []).filter((s: { status: number }) => s.status === 1);
 
             if (sessions.length === 0) {
                 await ctx.reply(`❌ AS${targetAsn} has no active peers\nAS${targetAsn} 没有活跃的 Peer`);
@@ -2043,9 +2728,9 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         try {
             // Get user's sessions
             const result = await apiRequest('/admin', 'POST', {
-                action: 'list',
+                action: 'enumSessions',
                 asn,
-            });
+            }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.reply(`❌ Error: ${result.message}`);
@@ -2059,61 +2744,162 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            // Check status for each session
+            // Fetch live status from agents in parallel
             const { getAgentEndpoint } = await import('../providers/nodes');
-            let statusMessage = `📊 *Status for AS${asn}*\n\n`;
+            type LiveStatus = {
+                bgp_status?: string;
+                wg_status?: string;
+                last_handshake?: string;
+                transfer?: { rx: string; tx: string };
+                routes_imported?: number;
+                routes_exported?: number;
+            };
 
-            for (const session of sessions) {
-                const router = session.router;
-                statusMessage += `📍 *${router}*\n`;
-
+            const fetchPromises = sessions.map(async (session: { router: string; routerName?: string; ipv6?: string; endpoint?: string }) => {
+                const router = session.routerName || session.router;
                 try {
-                    const endpoint = await getAgentEndpoint(router);
-                    if (!endpoint) {
-                        statusMessage += `   ❌ Agent unreachable\n\n`;
-                        continue;
-                    }
+                    const agentUrl = await getAgentEndpoint(router);
+                    if (!agentUrl) return { router, session, live: null };
 
                     const peerName = `dn42_${asn}`;
-                    const response = await fetch(`${endpoint}/status/${peerName}`, {
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 5000);
+
+                    const resp = await fetch(`${agentUrl}/peer/${peerName}`, {
                         method: 'GET',
-                        headers: {
-                            'Authorization': `Bearer ${config.agentToken || ''}`,
-                        },
+                        headers: { 'Authorization': `Bearer ${config.agentToken || ''}` },
+                        signal: controller.signal,
                     });
+                    clearTimeout(timeout);
 
-                    if (response.ok) {
-                        const data = await response.json() as {
-                            wg_status?: string;
-                            bgp_status?: string;
-                            last_handshake?: string;
-                            transfer?: { rx: string; tx: string };
-                        };
-
-                        const wgIcon = data.wg_status === 'up' ? '🟢' : '🔴';
-                        const bgpIcon = data.bgp_status?.includes('Established') ? '🟢' : '🟡';
-
-                        statusMessage += `   WG: ${wgIcon} ${data.wg_status || 'unknown'}\n`;
-                        statusMessage += `   BGP: ${bgpIcon} ${data.bgp_status || 'unknown'}\n`;
-                        if (data.last_handshake) {
-                            statusMessage += `   Handshake: ${data.last_handshake}\n`;
-                        }
-                        if (data.transfer) {
-                            statusMessage += `   Traffic: ↓${data.transfer.rx} ↑${data.transfer.tx}\n`;
-                        }
-                    } else {
-                        statusMessage += `   ⚠️ Status check failed\n`;
+                    if (resp.ok) {
+                        const data = await resp.json() as LiveStatus;
+                        return { router, session, live: data };
                     }
-                } catch (e) {
-                    statusMessage += `   ❌ Error checking status\n`;
+                    return { router, session, live: null };
+                } catch {
+                    return { router, session, live: null };
+                }
+            });
+
+            const results = await Promise.allSettled(fetchPromises);
+
+            let statusMessage = `📊 *Status for AS${asn}*\n\n`;
+
+            for (const r of results) {
+                if (r.status !== 'fulfilled' || !r.value) continue;
+                const { router, session, live } = r.value;
+
+                if (live) {
+                    // BGP line
+                    const bgpIcon = live.bgp_status === 'Established' ? '🟢' : '🟡';
+                    const routeInfo = (live.routes_imported !== undefined && live.routes_exported !== undefined)
+                        ? ` (${live.routes_imported}↓ ${live.routes_exported}↑)`
+                        : '';
+                    statusMessage += `📍 *${router}* ${bgpIcon} ${live.bgp_status || 'unknown'}${routeInfo}\n`;
+
+                    // WG handshake line
+                    if (live.last_handshake && live.last_handshake !== 'never') {
+                        statusMessage += `   🔒 WG handshake: ${live.last_handshake}\n`;
+                    } else {
+                        statusMessage += `   ❌ WG: no handshake\n`;
+                    }
+
+                    // Transfer line
+                    if (live.transfer) {
+                        statusMessage += `   📶 Transfer: ↓${live.transfer.rx} ↑${live.transfer.tx}\n`;
+                    }
+                } else {
+                    // Agent unreachable — show DB status
+                    statusMessage += `📍 *${router}* 🟢 Active\n`;
+                    if (session.ipv6) statusMessage += `   IPv6: \`${session.ipv6}\`\n`;
+                    statusMessage += `   ⚠️ Agent unreachable\n`;
                 }
                 statusMessage += `\n`;
             }
 
-            await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
+            await ctx.reply(statusMessage.slice(0, 4000), { parse_mode: 'Markdown' });
         } catch (error) {
             console.error('[Status] Error:', error);
             await ctx.reply('❌ Failed to check status.');
+        }
+    });
+
+    /**
+     * /peers - Quick list of all peers (lightweight, no agent calls)
+     */
+    bot.command('peers', async (ctx) => {
+        const args = ctx.match?.trim().split(/\s+/) || [];
+        let targetAsn = ctx.session.asn;
+
+        const username = ctx.from?.username?.toLowerCase();
+        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
+        const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
+
+        if (args[0] && isAsnInput(args[0])) {
+            if (!isAdmin) {
+                await ctx.reply('❌ Only admin can list other ASN peers\n只有管理员可以查看其他 ASN 的 Peer');
+                return;
+            }
+            targetAsn = normalizeAsn(args[0]);
+        }
+
+        if (!targetAsn) {
+            await ctx.reply('❌ Please /login first.\n请先登录');
+            return;
+        }
+
+        try {
+            const result = await apiRequest('/admin', 'POST', {
+                action: 'enumSessions',
+                asn: targetAsn,
+            }, config.apiToken);
+
+            if (result.code !== 0) {
+                await ctx.reply(`❌ Error: ${result.message}`);
+                return;
+            }
+
+            const sessions: Array<{
+                uuid: string;
+                router: string;
+                routerName?: string;
+                status: number;
+            }> = result.data?.sessions || [];
+
+            if (sessions.length === 0) {
+                await ctx.reply(
+                    `📋 *Peers for AS${targetAsn}*\n\n` +
+                    `No peers found. Use /peer to create one.\n` +
+                    `没有 Peer，使用 /peer 创建。`,
+                    { parse_mode: 'Markdown' }
+                );
+                return;
+            }
+
+            const STATUS_MAP: Record<number, string> = {
+                0: '❌ Inactive',
+                1: '🟢 Active',
+                2: '🔴 Failed',
+                3: '⏳ Pending',
+                4: '🔄 Migrating',
+                5: '🗑️ Deleting',
+            };
+
+            let message = `📋 *Peers for AS${targetAsn}* (${sessions.length})\n\n`;
+
+            for (const s of sessions) {
+                const displayName = s.routerName || s.router;
+                const status = STATUS_MAP[s.status] || `❓ Unknown(${s.status})`;
+                message += `• \`${displayName}\` — ${status}\n`;
+            }
+
+            message += `\nUse /info for details, /modify to change, /remove to delete.`;
+
+            await ctx.reply(message, { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error('[Peers] Error:', error);
+            await ctx.reply('❌ Failed to fetch peers.');
         }
     });
 }
