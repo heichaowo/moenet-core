@@ -140,6 +140,7 @@ export function autoRegisterMiddleware<C extends Context & { session: { asn?: nu
             // Fire-and-forget: don't block the command handler
             const asn = ctx.session.asn;
             const telegramId = ctx.from.id;
+            const username = ctx.from.username || undefined;
             fetch(`${apiUrl}/admin`, {
                 method: 'POST',
                 headers: {
@@ -150,6 +151,7 @@ export function autoRegisterMiddleware<C extends Context & { session: { asn?: nu
                     action: 'registerTelegramId',
                     asn,
                     telegramId,
+                    username,
                 }),
             }).then(() => {
                 ctx.session._registered = true;

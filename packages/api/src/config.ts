@@ -59,6 +59,8 @@ export default {
 	telegram: {
 		botToken: process.env.TELEGRAM_BOT_TOKEN || "",
 		adminChatId: process.env.TELEGRAM_ADMIN_CHAT_ID || "",
+		apiId: Number(process.env.TG_API_ID) || 0,
+		apiHash: process.env.TG_API_HASH || "",
 	},
 
 	smtp: {
