@@ -84,11 +84,15 @@ interface SessionData {
         /** Router UUIDs selected for targeted announce. Empty = all. */
         selectedRouters?: string[];
         /** Cached target user count for menu display */
-        targetCount?: { tg: number; email: number };
-        /** Failed TG targets for retry */
-        failedTg?: Array<{ asn: number; telegramId: number }>;
-        /** Failed email targets for retry */
-        failedEmail?: Array<{ asn: number; email: string }>;
+        targetCount?: { tg: number; email: number; both: number; total: number };
+        /** Failed delivery results for retry */
+        failedResults?: Array<{
+            asn: number;
+            tg: "sent" | "failed" | "no_channel";
+            email: "sent" | "failed" | "no_channel";
+            telegramId?: number;
+            emailAddr?: string;
+        }>;
         /** Awaiting message text input */
         awaitingMessage?: boolean;
     };

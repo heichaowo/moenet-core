@@ -2002,9 +2002,9 @@ async function generateSnapshot(c: Context): Promise<Response> {
  */
 async function registerTelegramId(
 	c: Context,
-	body: { asn?: number; telegramId?: number | string },
+	body: { asn?: number; telegramId?: number | string; username?: string },
 ): Promise<Response> {
-	const { asn, telegramId } = body;
+	const { asn, telegramId, username } = body;
 
 	if (asn == null || telegramId == null) {
 		return makeResponse(
@@ -2024,17 +2024,25 @@ async function registerTelegramId(
 			defaults: {
 				asn: Number(asn),
 				telegramId: Number(telegramId),
+				username: username || null,
 				isAdmin: false,
 				isBlocked: false,
 			} as any,
 		});
 
 		if (!created) {
-			await user.update({ telegramId: Number(telegramId) });
+			const updates: Record<string, unknown> = {
+				telegramId: Number(telegramId),
+			};
+			// Update username if provided (it can change)
+			if (username !== undefined) {
+				updates.username = username || null;
+			}
+			await user.update(updates);
 		}
 
 		console.log(
-			`[Admin] ${created ? "Created" : "Updated"} user AS${asn} with telegramId ${telegramId}`,
+			`[Admin] ${created ? "Created" : "Updated"} user AS${asn} with telegramId ${telegramId}${username ? ` (@${username})` : ""}`,
 		);
 		return success(c, { message: "User registered", created });
 	} catch (error) {
@@ -2049,8 +2057,16 @@ async function registerTelegramId(
 }
 
 /**
- * Get notification targets — users with active BGP sessions and a registered telegramId.
- * Optionally filter by ASN list.
+ * Get notification targets — unified per-ASN structure with all available
+ * contact channels (TG + Email) for dual-channel announcement sending.
+ *
+ * Resolution chain for TG:
+ *   1. users table (telegramId) — most authoritative
+ *   2. bgp_sessions.contact (@username) → Redis cache
+ *   3. bgp_sessions.contact (@username) → MTProto API → upsert users table
+ *
+ * Emails are collected from bgp_sessions.contact for ALL ASNs, enabling
+ * dual-channel delivery where both TG and email are available.
  */
 async function getNotificationTargets(
 	c: Context,
@@ -2062,10 +2078,8 @@ async function getNotificationTargets(
 		let targetAsns: number[];
 
 		if (body.asns && body.asns.length > 0) {
-			// Targeted notification: query users directly by ASN (no bgp_sessions filter)
 			targetAsns = body.asns.map(Number);
 		} else {
-			// Build where clause for bgp_sessions
 			const sessionWhere: Record<string, unknown> = {
 				status: {
 					[Op.in]: [
@@ -2076,7 +2090,6 @@ async function getNotificationTargets(
 				},
 			};
 
-			// Optional: filter by specific routers (for node-targeted announcements)
 			if (body.routers && body.routers.length > 0) {
 				sessionWhere.router = { [Op.in]: body.routers };
 			}
@@ -2090,10 +2103,19 @@ async function getNotificationTargets(
 		}
 
 		if (targetAsns.length === 0) {
-			return success(c, { targets: [] });
+			return success(c, { targets: [], allAsns: [] });
 		}
 
-		// Find users with telegramId for those ASNs
+		// Step 1: Build per-ASN target map
+		const targetMap = new Map<
+			number,
+			{ asn: number; telegramId?: number; emails: string[] }
+		>();
+		for (const asn of targetAsns) {
+			targetMap.set(asn, { asn, emails: [] });
+		}
+
+		// Step 2: Fill TG IDs from users table (most authoritative source)
 		const users = await models.users.findAll({
 			where: {
 				asn: { [Op.in]: targetAsns },
@@ -2101,70 +2123,126 @@ async function getNotificationTargets(
 			},
 		});
 
-		const targets = users.map((u) => ({
-			asn: u.get("asn") as number,
-			telegramId: u.get("telegramId") as number,
-		}));
+		for (const u of users) {
+			const asn = u.get("asn") as number;
+			const t = targetMap.get(asn);
+			if (t) t.telegramId = u.get("telegramId") as number;
+		}
 
-		// For ASNs not in users table, try to resolve via bgp_sessions.contact
-		const foundAsns = new Set(targets.map((t) => t.asn));
-		const missingAsns = targetAsns.filter((a) => !foundAsns.has(a));
+		// Step 3: Query bgp_sessions.contact for ALL target ASNs (dual-channel)
+		const contactSessions = await models.bgpSessions.findAll({
+			where: {
+				asn: { [Op.in]: targetAsns },
+				contact: { [Op.ne]: null },
+			},
+			attributes: ["asn", "contact"],
+			group: ["asn", "contact"],
+		});
 
-		const emailFallbacks: Array<{ asn: number; email: string }> = [];
-		if (missingAsns.length > 0) {
-			const sessions = await models.bgpSessions.findAll({
-				where: {
-					asn: { [Op.in]: missingAsns },
-					contact: { [Op.ne]: null },
-				},
-				attributes: ["asn", "contact"],
-				group: ["asn", "contact"],
-			});
+		const redis = getRedis();
+		const mtprotoQueue: Array<{ asn: number; username: string }> = [];
 
-			const redis = getRedis();
+		for (const s of contactSessions) {
+			const contact = ((s.get("contact") as string) || "").trim();
+			const asn = s.get("asn") as number;
+			const t = targetMap.get(asn);
+			if (!t) continue;
 
-			for (const s of sessions) {
-				const contact = ((s.get("contact") as string) || "").trim();
-				const asn = s.get("asn") as number;
+			// Parse contact: @username or telegram:@xxx → TG; email@xxx → email
+			let username: string | null = null;
+			if (contact.startsWith("@")) {
+				username = contact.slice(1).toLowerCase();
+			} else if (contact.toLowerCase().startsWith("telegram:")) {
+				const match = contact.match(/@(\w+)/);
+				if (match?.[1]) username = match[1].toLowerCase();
+			}
 
-				// Already resolved this ASN
-				if (foundAsns.has(asn)) continue;
-
-				// Try to resolve @username via Redis cache
-				let username: string | null = null;
-				if (contact.startsWith("@")) {
-					username = contact.slice(1).toLowerCase();
-				} else if (contact.toLowerCase().startsWith("telegram:")) {
-					// "telegram: @username" or "Telegram: @abc123"
-					const match = contact.match(/@(\w+)/);
-					if (match?.[1]) username = match[1].toLowerCase();
-				}
-
-				if (username) {
-					try {
-						const cachedId = await redis.get(`tg:username:${username}`);
-						if (cachedId) {
-							targets.push({ asn, telegramId: Number(cachedId) });
-							foundAsns.add(asn);
-							continue;
-						}
-					} catch {
-						// Redis unavailable, skip
+			// TG username resolution (only if no telegramId yet from users table)
+			if (username && !t.telegramId) {
+				try {
+					const cachedId = await redis.get(
+						`tg:username:${username}`,
+					);
+					if (cachedId) {
+						t.telegramId = Number(cachedId);
+					} else {
+						mtprotoQueue.push({ asn, username });
 					}
+				} catch {
+					mtprotoQueue.push({ asn, username });
 				}
+			}
 
-				// Email fallback: contact contains @ but is not a telegram username
-				if (
-					contact.includes("@") &&
-					!contact.startsWith("@") &&
-					!contact.toLowerCase().startsWith("telegram:")
-				) {
-					emailFallbacks.push({ asn, email: contact });
+			// Email: always collect (for dual-channel sending)
+			if (
+				contact.includes("@") &&
+				!contact.startsWith("@") &&
+				!contact.toLowerCase().startsWith("telegram:")
+			) {
+				if (!t.emails.includes(contact)) {
+					t.emails.push(contact);
 				}
 			}
 		}
 
-		return success(c, { targets, emailFallbacks, allAsns: targetAsns });
+		// Step 4: MTProto resolution for unresolved usernames
+		if (mtprotoQueue.length > 0) {
+			const { resolveUsername } = await import(
+				"../providers/telegram-resolver"
+			);
+
+			for (const item of mtprotoQueue) {
+				const t = targetMap.get(item.asn);
+				if (!t || t.telegramId) continue;
+
+				const resolvedId = await resolveUsername(item.username);
+				if (resolvedId) {
+					t.telegramId = resolvedId;
+
+					// Persist to Redis cache (non-blocking)
+					redis
+						.set(
+							`tg:username:${item.username}`,
+							String(resolvedId),
+							"EX",
+							86400 * 90,
+						)
+						.catch(() => {});
+
+					// Persist to users table (non-blocking upsert)
+					models.users
+						.findOrCreate({
+							where: { asn: item.asn },
+							defaults: {
+								asn: item.asn,
+								telegramId: resolvedId,
+								username: item.username,
+								isAdmin: false,
+								isBlocked: false,
+							} as Record<string, unknown>,
+						})
+						.then(([user, created]) => {
+							if (!created) {
+								user.update({
+									telegramId: resolvedId,
+									username: item.username,
+								});
+							}
+						})
+						.catch((err) => {
+							console.error(
+								`[Admin] Failed to persist MTProto-resolved user AS${item.asn}:`,
+								err,
+							);
+						});
+				}
+			}
+		}
+
+		return success(c, {
+			targets: [...targetMap.values()],
+			allAsns: targetAsns,
+		});
 	} catch (error) {
 		console.error("[Admin] Error getting notification targets:", error);
 		return makeResponse(
@@ -2175,6 +2253,13 @@ async function getNotificationTargets(
 		);
 	}
 }
+
+
+
+
+
+
+
 
 /**
  * Backfill contact info for sessions belonging to a given ASN.
