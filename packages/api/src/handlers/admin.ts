@@ -2160,9 +2160,7 @@ async function getNotificationTargets(
 			// TG username resolution (only if no telegramId yet from users table)
 			if (username && !t.telegramId) {
 				try {
-					const cachedId = await redis.get(
-						`tg:username:${username}`,
-					);
+					const cachedId = await redis.get(`tg:username:${username}`);
 					if (cachedId) {
 						t.telegramId = Number(cachedId);
 					} else {
@@ -2253,13 +2251,6 @@ async function getNotificationTargets(
 		);
 	}
 }
-
-
-
-
-
-
-
 
 /**
  * Backfill contact info for sessions belonging to a given ASN.
