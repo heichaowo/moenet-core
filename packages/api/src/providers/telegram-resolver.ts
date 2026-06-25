@@ -9,7 +9,7 @@
  * Gracefully disabled when TG_API_ID / TG_API_HASH are not configured.
  */
 
-import { TelegramClient, Api } from "telegram";
+import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
 import { logger } from "../common/logger";
 import config from "../config";
