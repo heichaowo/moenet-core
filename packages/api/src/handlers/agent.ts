@@ -13,6 +13,7 @@ import {
 	computeLoopbackIPv4,
 	computeLoopbackIPv6,
 	deriveLLAFromLoopback,
+	getContinentFromRegionCode,
 } from "../services/ipAllocator";
 
 /**
@@ -662,7 +663,11 @@ async function handleConfig(
 	routerRecord: any,
 ): Promise<Response> {
 	const name = routerRecord.get("name") as string;
-	const region = routerRecord.get("region") as string;
+	// routers has no `region` column (only regionCode/location), so the old
+	// get("region") was always undefined. Derive a continent label from regionCode.
+	const region = getContinentFromRegionCode(
+		(routerRecord.get("regionCode") as number) ?? 0,
+	);
 	const location = routerRecord.get("location") as string;
 
 	// Build agent configuration
