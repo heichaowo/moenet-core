@@ -2171,9 +2171,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         }
 
         try {
-            const result = isAdminMode
-                ? await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken)
-                : await apiRequest('/session', 'POST', { action: 'list', asn: targetAsn });
+            // Always use the admin API: the bot holds the admin token, while
+            // /session needs a per-user JWT the bot never has (caused "Unauthorized"
+            // / 未授权 for normal users running /modify and /remove).
+            const result = await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.reply(`❌ Error: ${result.message}`);
@@ -2568,9 +2569,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         }
 
         try {
-            const result = isAdminMode
-                ? await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken)
-                : await apiRequest('/session', 'POST', { action: 'list', asn: targetAsn });
+            // Always use the admin API: the bot holds the admin token, while
+            // /session needs a per-user JWT the bot never has (caused "Unauthorized"
+            // / 未授权 for normal users running /modify and /remove).
+            const result = await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.reply(`❌ Error: ${result.message}`);
