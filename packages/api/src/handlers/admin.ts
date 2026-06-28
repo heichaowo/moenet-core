@@ -520,7 +520,7 @@ async function enumSessions(
 		order: [["created_at", "DESC"]],
 	});
 
-	// Resolve router names
+	// Resolve router names + server-side connection info
 	const routerUuids = [
 		...new Set(sessions.map((s) => s.get("router") as string)),
 	];
@@ -528,14 +528,47 @@ async function enumSessions(
 		where: { uuid: routerUuids },
 	});
 	const routerMap = new Map(
-		routers.map((r) => [r.get("uuid") as string, r.get("name") as string]),
+		routers.map((r) => [
+			r.get("uuid") as string,
+			{
+				name: r.get("name") as string,
+				publicIp: r.get("publicIp") as string | null,
+				publicIpv6: r.get("publicIpv6") as string | null,
+				wgPublicKey: r.get("wgPublicKey") as string | null,
+			},
+		]),
 	);
 
 	return success(c, {
-		sessions: sessions.map((s) => ({
-			...s.get(),
-			routerName: routerMap.get(s.get("router") as string) || s.get("router"),
-		})),
+		sessions: sessions.map((s) => {
+			const raw = s.get();
+			const routerInfo = routerMap.get(raw.router as string);
+
+			// Extract listen_port from credential JSON to build the server endpoint
+			let listenPort: number | null = null;
+			if (raw.credential && typeof raw.credential === "string") {
+				try {
+					const cred = JSON.parse(raw.credential);
+					if (cred.listen_port) listenPort = cred.listen_port;
+				} catch {
+					/* ignore parse errors */
+				}
+			}
+
+			let serverEndpoint: string | null = null;
+			if (routerInfo?.publicIp && listenPort) {
+				serverEndpoint = `${routerInfo.publicIp}:${listenPort}`;
+			} else if (routerInfo?.publicIpv6 && listenPort) {
+				serverEndpoint = `[${routerInfo.publicIpv6}]:${listenPort}`;
+			}
+
+			return {
+				...raw,
+				routerName: routerInfo?.name || raw.router,
+				serverEndpoint,
+				serverWgKey: routerInfo?.wgPublicKey || null,
+			};
+		}),
 	});
 }
 

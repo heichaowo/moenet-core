@@ -6,6 +6,7 @@ import { apiRequest } from '../api';
 import { isChinaIP, resolveEndpoint, CN_REJECTION_MESSAGE } from '../providers/chinaIp';
 import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../services/dn42Validator';
 import { DIVIDER } from '../templates';
+import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
 
 // Import from new peer module
 import {
@@ -1429,9 +1430,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     await ctx.reply('⏳ Creating peer...\n正在创建 Peer...');
 
                     try {
-                        const action = flow.isAdminMode ? 'adminCreate' : 'create';
+                        // Must match the API action; 'create'/'adminCreate' don't exist
+                        // (the admin handler only knows 'createSession') and previously
+                        // made the text "yes" confirm path fail with "Invalid action".
                         const result = await apiRequest('/admin', 'POST', {
-                            action,
+                            action: 'createSession',
                             asn,
                             router: flow.sessionUuid,
                             ipv6: flow.ipv6,
@@ -1439,6 +1442,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                             publicKey: flow.publicKey,
                             mtu: flow.mtu || 1420,
                             psk: flow.psk,
+                            contact: flow.contact || undefined,
                             status: flow.isAdminMode ? 1 : undefined,
                         }, config.apiToken);
 
@@ -1486,12 +1490,14 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                                 .row()
                                 .text('📋 All Pending', 'admin:pending');
 
+                            let notified = false;
                             for (let attempt = 1; attempt <= 3; attempt++) {
                                 try {
                                     await ctx.api.sendMessage(config.adminChatId, adminNotification, {
                                         parse_mode: 'Markdown',
                                         reply_markup: keyboard,
                                     });
+                                    notified = true;
                                     break;
                                 } catch (e) {
                                     console.error(`[Notify Admin] Attempt ${attempt}/3 failed:`, e);
@@ -1500,6 +1506,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                                     }
                                 }
                             }
+                            if (!notified) {
+                                console.error(`[Notify Admin] Gave up notifying admin about AS${asn} peer request after 3 attempts`);
+                            }
+                        } else if (!flow.isAdminMode) {
+                            console.warn(`[Notify Admin] New peer request from AS${asn} but TELEGRAM_ADMIN_CHAT_ID is not set — admin will NOT be notified.`);
                         }
 
                         ctx.session.peerFlow = undefined;
@@ -1987,9 +1998,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         await ctx.reply('⏳ Fetching peer info...\n正在获取 Peer 信息...');
 
         try {
-            const result = useAdminApi
-                ? await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken)
-                : await apiRequest('/session', 'POST', { action: 'list', asn: targetAsn });
+            // Always use the admin API: the bot is a trusted backend and holds the
+            // admin token, whereas /session requires a per-user JWT the bot never has
+            // (which previously made normal-user /info fail with "Unauthorized").
+            // useAdminApi only affects display labels below.
+            const result = await apiRequest('/admin', 'POST', { action: 'enumSessions', asn: targetAsn }, config.apiToken);
 
             if (result.code !== 0) {
                 await ctx.reply(`❌ Error: ${result.message}`);
@@ -2021,7 +2034,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             };
             const liveStatusMap = new Map<string, LiveStatus | null>();
 
-            const activeSessions = sessions.filter(s => s.status === 1);
+            const activeSessions = sessions.filter(s => s.status === PeeringStatus.ENABLED);
             if (activeSessions.length > 0) {
                 const fetchPromises = activeSessions.map(async (s) => {
                     const router = s.routerName || s.router;
@@ -2061,8 +2074,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             let message = `📊 *Peer Info for AS${targetAsn}*\n\n`;
 
             for (const [i, s] of sessions.entries()) {
-                const statusIcon = s.status === 1 ? '🟢' : s.status === 3 ? '⏳' : '❌';
-                const statusText = s.status === 1 ? 'Active' : s.status === 3 ? 'Pending' : 'Inactive';
+                const statusIcon = s.status === PeeringStatus.ENABLED ? '🟢' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '❌';
+                const statusText = s.status === PeeringStatus.ENABLED ? 'Active' : s.status === PeeringStatus.PENDING_REVIEW ? 'Pending' : 'Inactive';
                 const displayName = s.routerName || s.router;
 
                 message += `*${i + 1}. ${displayName}* ${statusIcon} ${statusText}\n`;
@@ -2073,7 +2086,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 if (s.serverWgKey) message += `   🔑 Server Key: \`${s.serverWgKey.slice(0, 10)}...\`\n`;
 
                 // Live status from agent
-                if (s.status === 1) {
+                if (s.status === PeeringStatus.ENABLED) {
                     const live = liveStatusMap.get(displayName);
                     if (live) {
                         // BGP status
@@ -2632,7 +2645,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            const sessions = (result.data?.sessions || []).filter((s: { status: number }) => s.status === 1);
+            const sessions = (result.data?.sessions || []).filter((s: { status: number }) => s.status === PeeringStatus.ENABLED);
 
             if (sessions.length === 0) {
                 await ctx.reply(`❌ AS${targetAsn} has no active peers\nAS${targetAsn} 没有活跃的 Peer`);
@@ -2737,7 +2750,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            const sessions = (result.data?.sessions || []).filter((s: { status: number }) => s.status === 1);
+            const sessions = (result.data?.sessions || []).filter((s: { status: number }) => s.status === PeeringStatus.ENABLED);
 
             if (sessions.length === 0) {
                 await ctx.reply('ℹ️ You have no active peers.\n你没有活跃的 Peer');
@@ -2877,20 +2890,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            const STATUS_MAP: Record<number, string> = {
-                0: '❌ Inactive',
-                1: '🟢 Active',
-                2: '🔴 Failed',
-                3: '⏳ Pending',
-                4: '🔄 Migrating',
-                5: '🗑️ Deleting',
-            };
-
             let message = `📋 *Peers for AS${targetAsn}* (${sessions.length})\n\n`;
 
             for (const s of sessions) {
                 const displayName = s.routerName || s.router;
-                const status = STATUS_MAP[s.status] || `❓ Unknown(${s.status})`;
+                const status = STATUS_LABELS[s.status] || `❓ Unknown(${s.status})`;
                 message += `• \`${displayName}\` — ${status}\n`;
             }
 
