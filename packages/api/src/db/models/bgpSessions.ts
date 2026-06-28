@@ -73,7 +73,9 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 				allowNull: false,
 			},
 			status: {
-				type: DataTypes.TINYINT.UNSIGNED,
+				// SMALLINT, not TINYINT: Postgres has no TINYINT, so a fresh
+				// sync({alter:true}) would fail with `type "tinyint" does not exist`.
+				type: DataTypes.SMALLINT.UNSIGNED,
 				allowNull: false,
 				defaultValue: PeeringStatus.PENDING_REVIEW,
 			},
@@ -83,7 +85,8 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 				defaultValue: 1420,
 			},
 			policy: {
-				type: DataTypes.TINYINT.UNSIGNED,
+				// SMALLINT, not TINYINT (Postgres has no TINYINT) — see status above.
+				type: DataTypes.SMALLINT.UNSIGNED,
 				allowNull: false,
 				defaultValue: SessionPolicy.FULL,
 			},
