@@ -7,6 +7,7 @@ import { getModels } from "../db/dbContext";
 import {
 	type BgpSessionAttributes,
 	PeeringStatus,
+	SessionPolicy,
 } from "../db/models/bgpSessions";
 import { getRedis } from "../db/redisContext";
 import {
@@ -301,7 +302,10 @@ async function handleSessions(c: Context, router: string): Promise<Response> {
 			data: typeof s.data === "string" ? JSON.parse(s.data) : s.data || null,
 			mtu: s.mtu,
 			port,
-			policy: s.policy,
+			// Agent's BgpSession.Policy is a string; sending the raw enum number
+			// triggers a json unmarshal type error on the agent (tolerated, since
+			// the bird templates don't use the value). Send the policy name.
+			policy: (SessionPolicy[s.policy as number] ?? "FULL").toLowerCase(),
 			lastError: s.lastError,
 		};
 	});
