@@ -96,6 +96,14 @@ interface SessionData {
         /** Awaiting message text input */
         awaitingMessage?: boolean;
     };
+    /** Migrate flow: router list + selected source/target indices.
+     *  UUIDs are kept here (not in callback_data) because two 36-char UUIDs
+     *  exceed Telegram's 64-byte callback_data limit. */
+    migrateFlow?: {
+        routers: Array<{ uuid: string; name: string; region?: string }>;
+        fromIdx?: number;
+        toIdx?: number;
+    };
     /** Notify flow: message + ASN targets for inline keyboard interaction */
     notifyFlow?: {
         message?: string;

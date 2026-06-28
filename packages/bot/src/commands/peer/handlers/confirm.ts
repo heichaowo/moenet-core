@@ -85,12 +85,14 @@ export function registerConfirmHandlers(bot: Bot<BotContext>) {
                     .text('📋 All Pending', 'admin:pending');
 
                 // Retry up to 3 times with backoff
+                let notified = false;
                 for (let attempt = 1; attempt <= 3; attempt++) {
                     try {
                         await ctx.api.sendMessage(config.adminChatId, adminNotification, {
                             parse_mode: 'Markdown',
                             reply_markup: keyboard,
                         });
+                        notified = true;
                         break; // Success
                     } catch (e) {
                         console.error(`[Notify Admin] Attempt ${attempt}/3 failed:`, e);
@@ -99,6 +101,11 @@ export function registerConfirmHandlers(bot: Bot<BotContext>) {
                         }
                     }
                 }
+                if (!notified) {
+                    console.error(`[Notify Admin] Gave up notifying admin about AS${asn} peer request after 3 attempts`);
+                }
+            } else if (!flow.isAdminMode) {
+                console.warn(`[Notify Admin] New peer request from AS${asn} but TELEGRAM_ADMIN_CHAT_ID is not set — admin will NOT be notified.`);
             }
 
             ctx.session.peerFlow = undefined;

@@ -19,6 +19,7 @@ import { apiRequest } from '../api';
 import { getRanking, getAsnInfo, getNetworkStats } from '../services/iedonApi';
 import type { RankingEntry } from '../services/iedonApi';
 import { normalizeAsn, isAsnInput } from './peer/validators';
+import { PeeringStatus } from '../peeringStatus';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -220,7 +221,7 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
 
                 let message = `📋 *All Peers (Admin View)*\n所有 Peer（管理员视图）\n\n`;
                 for (const s of sessions) {
-                    const statusIcon = s.status === 1 ? '✅' : s.status === 3 ? '⏳' : '❌';
+                    const statusIcon = s.status === PeeringStatus.ENABLED ? '✅' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '❌';
                     message += `${statusIcon} \`AS${s.asn}\` @ ${s.router}\n`;
                 }
                 message += `\n_共 ${sessions.length} 个 Peer_`;
@@ -232,10 +233,10 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
                     return;
                 }
 
-                const result = await apiRequest('/session', 'POST', {
-                    action: 'list',
+                const result = await apiRequest('/admin', 'POST', {
+                    action: 'enumSessions',
                     asn: ctx.session.asn,
-                });
+                }, config.apiToken);
 
                 if (result.code !== 0) {
                     await ctx.reply(`❌ Error: ${result.message}`);
@@ -250,9 +251,9 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
                 }
 
                 let message = `👥 *Your Peers (${sessions.length})*\n\n`;
-                sessions.forEach((s: { status: number; router: string }, i: number) => {
-                    const statusIcon = s.status === 1 ? '🟢' : s.status === 3 ? '⏳' : '🔴';
-                    message += `${i + 1}. ${statusIcon} ${s.router}\n`;
+                sessions.forEach((s: { status: number; routerName?: string; router: string }, i: number) => {
+                    const statusIcon = s.status === PeeringStatus.ENABLED ? '🟢' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '🔴';
+                    message += `${i + 1}. ${statusIcon} ${s.routerName || s.router}\n`;
                 });
 
                 await ctx.reply(message, { parse_mode: 'Markdown' });

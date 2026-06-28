@@ -452,6 +452,7 @@ export function registerUserCommands(bot: Bot<BotContext>) {
         // Clean up admin flows
         if (ctx.session.announceFlow) { ctx.session.announceFlow = undefined; hadFlow = true; }
         if (ctx.session.notifyFlow) { ctx.session.notifyFlow = undefined; hadFlow = true; }
+        if (ctx.session.migrateFlow) { ctx.session.migrateFlow = undefined; hadFlow = true; }
         if (ctx.session.awaitingInfoAsn) { ctx.session.awaitingInfoAsn = false; hadFlow = true; }
 
         await ctx.reply(

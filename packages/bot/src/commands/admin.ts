@@ -213,7 +213,11 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			{ action: "enumRouters" },
 			config.apiToken,
 		);
-		const routers = result.data?.routers || [];
+		const routers = (result.data?.routers || []) as Array<{
+			uuid: string;
+			name?: string;
+			region?: string;
+		}>;
 
 		if (routers.length < 2) {
 			await ctx.reply(
@@ -222,22 +226,30 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			return;
 		}
 
+		// Store routers in session and reference them by index in callback_data.
+		// Embedding two UUIDs would exceed Telegram's 64-byte callback_data limit.
+		ctx.session.migrateFlow = {
+			routers: routers.map((r) => ({
+				uuid: r.uuid,
+				name: r.name || r.uuid,
+				region: r.region,
+			})),
+		};
+
 		const message =
 			`🔄 *Node Migration 节点迁移*\n\n` +
 			`Select the *source* node (migrate FROM):\n` +
 			`选择*源节点*（从哪个节点迁出）:\n\n`;
 
 		const keyboard = new InlineKeyboard();
-		for (const r of routers) {
-			const name = r.name || r.uuid;
-			const region = r.region || "";
+		ctx.session.migrateFlow.routers.forEach((r, i) => {
 			keyboard
 				.text(
-					`📍 ${name} ${region ? `(${region})` : ""}`,
-					`migrate:from:${r.uuid}`,
+					`📍 ${r.name} ${r.region ? `(${r.region})` : ""}`,
+					`migrate:from:${i}`,
 				)
 				.row();
-		}
+		});
 		keyboard.text("🚫 Cancel 取消", "migrate:cancel");
 
 		await ctx.reply(message, {
@@ -247,29 +259,25 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle source node selection
-	bot.callbackQuery(/^migrate:from:(.+)$/, async (ctx) => {
+	bot.callbackQuery(/^migrate:from:(\d+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
-
-		const fromRouter = ctx.match[1];
 		await ctx.answerCallbackQuery();
 
-		// Fetch routers to show targets (exclude source)
-		const result = await apiRequest(
-			"/admin",
-			"POST",
-			{ action: "enumRouters" },
-			config.apiToken,
-		);
-		const routers = (result.data?.routers || []).filter(
-			(r: { uuid: string }) => r.uuid !== fromRouter,
-		);
-		const sourceRouter = (result.data?.routers || []).find(
-			(r: { uuid: string }) => r.uuid === fromRouter!,
-		);
-		const sourceName = sourceRouter?.name || fromRouter!.slice(0, 8);
+		const flow = ctx.session.migrateFlow;
+		const fromIdx = Number(ctx.match[1]);
+		if (!flow || !flow.routers[fromIdx]) {
+			await ctx.editMessageText(
+				"❌ Session expired. Run /migrate again.\n会话已过期，请重新执行 /migrate",
+			);
+			return;
+		}
+
+		flow.fromIdx = fromIdx;
+		ctx.session.migrateFlow = flow;
+		const sourceName = flow.routers[fromIdx]!.name;
 
 		const message =
 			`🔄 *Migration 迁移*\n\n` +
@@ -278,16 +286,15 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			`选择*目标节点*（迁移到哪个节点）:\n\n`;
 
 		const keyboard = new InlineKeyboard();
-		for (const r of routers) {
-			const name = r.name || r.uuid;
-			const region = r.region || "";
+		flow.routers.forEach((r, i) => {
+			if (i === fromIdx) return; // exclude source
 			keyboard
 				.text(
-					`📍 ${name} ${region ? `(${region})` : ""}`,
-					`migrate:to:${fromRouter}:${r.uuid}`,
+					`📍 ${r.name} ${r.region ? `(${r.region})` : ""}`,
+					`migrate:to:${i}`,
 				)
 				.row();
-		}
+		});
 		keyboard.text("🚫 Cancel 取消", "migrate:cancel");
 
 		await ctx.editMessageText(message, {
@@ -297,15 +304,31 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle target node selection → dry run preview
-	bot.callbackQuery(/^migrate:to:(.+):(.+)$/, async (ctx) => {
+	bot.callbackQuery(/^migrate:to:(\d+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
-
-		const fromRouter = ctx.match[1];
-		const toRouter = ctx.match[2];
 		await ctx.answerCallbackQuery("Loading preview...");
+
+		const flow = ctx.session.migrateFlow;
+		const toIdx = Number(ctx.match[1]);
+		if (
+			!flow ||
+			flow.fromIdx === undefined ||
+			!flow.routers[flow.fromIdx] ||
+			!flow.routers[toIdx]
+		) {
+			await ctx.editMessageText(
+				"❌ Session expired. Run /migrate again.\n会话已过期，请重新执行 /migrate",
+			);
+			return;
+		}
+
+		flow.toIdx = toIdx;
+		ctx.session.migrateFlow = flow;
+		const fromRouter = flow.routers[flow.fromIdx]!.uuid;
+		const toRouter = flow.routers[toIdx]!.uuid;
 
 		// Dry run to preview
 		const result = await apiRequest(
@@ -362,7 +385,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			`确认执行迁移？所有会话将从 ${fromName} 迁移到 ${toName}。`;
 
 		const keyboard = new InlineKeyboard()
-			.text("✅ Confirm 确认迁移", `migrate:exec:${fromRouter}:${toRouter}`)
+			.text("✅ Confirm 确认迁移", "migrate:exec")
 			.text("🚫 Cancel 取消", "migrate:cancel");
 
 		await ctx.editMessageText(message, {
@@ -372,14 +395,29 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle migration execution
-	bot.callbackQuery(/^migrate:exec:(.+):(.+)$/, async (ctx) => {
+	bot.callbackQuery("migrate:exec", async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
 
-		const fromRouter = ctx.match[1];
-		const toRouter = ctx.match[2];
+		const flow = ctx.session.migrateFlow;
+		if (
+			!flow ||
+			flow.fromIdx === undefined ||
+			flow.toIdx === undefined ||
+			!flow.routers[flow.fromIdx] ||
+			!flow.routers[flow.toIdx]
+		) {
+			await ctx.answerCallbackQuery();
+			await ctx.editMessageText(
+				"❌ Session expired. Run /migrate again.\n会话已过期，请重新执行 /migrate",
+			);
+			return;
+		}
+
+		const fromRouter = flow.routers[flow.fromIdx]!.uuid;
+		const toRouter = flow.routers[flow.toIdx]!.uuid;
 		await ctx.answerCallbackQuery("Migrating...");
 		await ctx.editMessageText("⏳ Migration in progress...\n正在执行迁移...");
 
@@ -456,6 +494,8 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 				config.apiToken,
 			);
 		}
+
+		ctx.session.migrateFlow = undefined;
 	});
 
 	// Handle cancel
@@ -465,6 +505,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			return;
 		}
 		await ctx.answerCallbackQuery("Cancelled");
+		ctx.session.migrateFlow = undefined;
 		await ctx.editMessageText("🚫 Migration cancelled.\n迁移已取消。");
 	});
 
@@ -1588,7 +1629,9 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle "Done" → store selection, go to preview or back to menu
-	bot.callbackQuery(/^ann:done:(.+)$/, async (ctx) => {
+	// NOTE: restrict to bitmask (0/1 only) so "ann:done:dismiss" falls through
+	// to its dedicated handler instead of being parsed as a bitmask.
+	bot.callbackQuery(/^ann:done:([01]+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
