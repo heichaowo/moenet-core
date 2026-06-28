@@ -544,21 +544,15 @@ async function enumSessions(
 			const raw = s.get();
 			const routerInfo = routerMap.get(raw.router as string);
 
-			// Extract listen_port from credential JSON to build the server endpoint
-			let listenPort: number | null = null;
-			if (raw.credential && typeof raw.credential === "string") {
-				try {
-					const cred = JSON.parse(raw.credential);
-					if (cred.listen_port) listenPort = cred.listen_port;
-				} catch {
-					/* ignore parse errors */
-				}
-			}
+			// listen_port is deterministic from ASN (see getListenPort + createSession).
+			// Don't parse `credential`: it's a JSONB column, so Sequelize returns an
+			// object, not a string — the old `typeof === "string"` guard always failed.
+			const listenPort = getListenPort(raw.asn as number);
 
 			let serverEndpoint: string | null = null;
-			if (routerInfo?.publicIp && listenPort) {
+			if (routerInfo?.publicIp) {
 				serverEndpoint = `${routerInfo.publicIp}:${listenPort}`;
-			} else if (routerInfo?.publicIpv6 && listenPort) {
+			} else if (routerInfo?.publicIpv6) {
 				serverEndpoint = `[${routerInfo.publicIpv6}]:${listenPort}`;
 			}
 
@@ -2481,17 +2475,16 @@ async function checkMigrationNotify(
 			});
 			const publicIp = router?.get("publicIp") as string | null;
 
+			const publicIpv6 = router?.get("publicIpv6") as string | null;
+			// listen_port is deterministic from ASN (credential is JSONB, so the
+			// old string-parse always failed → endpoint was never resolved).
+			const listenPort = getListenPort(asn);
+
 			let serverEndpoint: string | null = null;
-			const credential = session.get("credential") as string | null;
-			if (credential) {
-				try {
-					const cred = JSON.parse(credential);
-					if (publicIp && cred.listen_port) {
-						serverEndpoint = `${publicIp}:${cred.listen_port}`;
-					}
-				} catch {
-					/* ignore */
-				}
+			if (publicIp) {
+				serverEndpoint = `${publicIp}:${listenPort}`;
+			} else if (publicIpv6) {
+				serverEndpoint = `[${publicIpv6}]:${listenPort}`;
 			}
 
 			ready.push({
