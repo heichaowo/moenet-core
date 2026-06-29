@@ -105,9 +105,14 @@ async function query(c: Context, body: AuthQueryInput): Promise<Response> {
 
 	const person = authInfo.person || `AS${asn}`;
 
-	// Sign the auth state
+	// Sign the auth state (short-lived: intermediate flow token).
 	const authState = await sign(
-		{ asn, person, availableAuthMethods },
+		{
+			asn,
+			person,
+			availableAuthMethods,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		},
 		config.auth.jwtSecret,
 		"HS256",
 	);
@@ -181,13 +186,15 @@ async function request(
 	// Generate random challenge code
 	const code = generateRandomCode();
 
-	// Create new auth state with selected method and code
+	// Create new auth state with selected method and code (carries the OTP, so
+	// short-lived — 5 min, matching the "10 minutes" UX with margin removed).
 	const newState = await sign(
 		{
 			asn: state.asn,
 			person: state.person,
 			authMethod,
 			code,
+			exp: Math.floor(Date.now() / 1000) + 300,
 		},
 		config.auth.jwtSecret,
 		"HS256",
@@ -280,9 +287,14 @@ async function challenge(
 		return success(c, { authResult: false, token: "" });
 	}
 
-	// Generate JWT token for authenticated user
+	// Generate JWT token for authenticated user (bounded session lifetime).
 	const token = await sign(
-		{ asn, person, iat: Math.floor(Date.now() / 1000) },
+		{
+			asn,
+			person,
+			iat: Math.floor(Date.now() / 1000),
+			exp: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+		},
 		config.auth.jwtSecret,
 		"HS256",
 	);
