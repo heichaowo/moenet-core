@@ -74,7 +74,10 @@ export function initBirdPoliciesModel(sequelize: Sequelize): BirdPoliciesModel {
 			},
 			dn42As: {
 				field: "dn42_as",
-				type: DataTypes.INTEGER.UNSIGNED,
+				// BIGINT: DN42 ASNs (4242420998) exceed PG's signed 32-bit INTEGER
+				// max, so a fresh DB + the default-policy seed would fail to insert.
+				// Returned as a number via the pg BIGINT type parser in dbContext.
+				type: DataTypes.BIGINT,
 				allowNull: false,
 				defaultValue: 4242420998,
 			},

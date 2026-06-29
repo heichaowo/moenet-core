@@ -33,12 +33,13 @@ async function main() {
 	const standalone = process.env.STANDALONE === "true";
 
 	try {
+		// Validate the JWT secret unconditionally — even standalone must not sign
+		// tokens with the known default (a misconfigured standalone could reach prod).
+		if (config.auth.jwtSecret === "change-me-in-production") {
+			console.error("❌ JWT_SECRET must be set (cannot use default value)");
+			process.exit(1);
+		}
 		if (!standalone) {
-			// Validate critical secrets
-			if (config.auth.jwtSecret === "change-me-in-production") {
-				console.error("❌ JWT_SECRET must be set (cannot use default value)");
-				process.exit(1);
-			}
 			if (!config.auth.agentApiKey) {
 				console.warn(
 					"⚠️  AGENT_API_KEY not set — agent/admin API will reject all requests",
