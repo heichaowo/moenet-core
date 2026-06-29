@@ -9,6 +9,7 @@ import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../../../index';
 import config from '../../../config';
 import { apiRequest } from '../api';
+import { isAdmin } from '../../../guards';
 
 /**
  * Register all remove flow callback handlers
@@ -22,6 +23,20 @@ export function registerRemoveHandlers(bot: Bot<BotContext>) {
         if (!uuid) return;
 
         await ctx.answerCallbackQuery();
+
+        // Ownership: a non-admin may only remove their own session. Without this,
+        // any user could craft remove:select:<other-uuid>, receive the confirm
+        // code (shown to them), and delete another peer.
+        const ownerCheck = await apiRequest('/admin', 'POST', { action: 'getSession', uuid }, config.apiToken);
+        const ownerSession = ownerCheck.data?.session as { asn?: number } | undefined;
+        if (ownerCheck.code !== 0 || !ownerSession) {
+            await ctx.editMessageText('❌ Session not found');
+            return;
+        }
+        if (!isAdmin(ctx) && Number(ownerSession.asn) !== ctx.session.asn) {
+            await ctx.editMessageText('❌ This peer does not belong to you.\n这不是你的 Peer。');
+            return;
+        }
 
         // Generate 4-char random hex confirmation code
         const bytes = new Uint8Array(2);

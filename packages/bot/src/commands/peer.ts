@@ -7,6 +7,7 @@ import { isChinaIP, resolveEndpoint, CN_REJECTION_MESSAGE } from '../providers/c
 import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../services/dn42Validator';
 import { DIVIDER } from '../templates';
 import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
+import { isAdmin } from '../guards';
 
 // Import from new peer module
 import {
@@ -2128,13 +2129,18 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
     // Handle info:refresh — re-fetch with the same ASN
     bot.callbackQuery(/^info:refresh:(\d+)$/, async (ctx) => {
-        await ctx.answerCallbackQuery('Refreshing... 刷新中...');
         const targetAsn = parseInt(ctx.match[1]!, 10);
+        const useAdminApi = isAdmin(ctx);
 
-        const username = ctx.from?.username?.toLowerCase();
-        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
-        const useAdminApi = username === adminUsername || ctx.session.isAdmin === true;
+        // Ownership: a non-admin may only refresh their own ASN. Without this,
+        // any user could craft info:refresh:<other-asn> and read another peer's
+        // endpoints/keys/UUIDs.
+        if (!useAdminApi && targetAsn !== ctx.session.asn) {
+            await ctx.answerCallbackQuery('❌ Not your ASN / 不是你的 ASN');
+            return;
+        }
 
+        await ctx.answerCallbackQuery('Refreshing... 刷新中...');
         await fetchAndDisplayInfo(ctx, targetAsn, useAdminApi);
     });
 
@@ -2232,6 +2238,14 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             const session = result.data?.session as any;
             if (!session) {
                 await ctx.editMessageText('❌ Session not found');
+                return;
+            }
+
+            // Ownership: a non-admin may only modify their own session. Without
+            // this, any user could craft modify:peer:<other-uuid> and hijack
+            // another peer's WireGuard config.
+            if (!isAdmin(ctx) && Number(session.asn) !== ctx.session.asn) {
+                await ctx.editMessageText('❌ This peer does not belong to you.\n这不是你的 Peer。');
                 return;
             }
 

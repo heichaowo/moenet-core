@@ -960,6 +960,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	 * /nodes - List all nodes
 	 */
 	bot.command("nodes", async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.reply("❌ Admin access required.\n需要管理员权限。");
+			return;
+		}
 		try {
 			const result = await apiRequest(
 				"/admin",
@@ -1046,6 +1050,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 	// Health overview callback: hov (health overview)
 	bot.callbackQuery(/^hov$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
+		}
 		try {
 			await renderHealthOverview(ctx, ctx.callbackQuery.message?.message_id);
 			await ctx.answerCallbackQuery();
@@ -1057,6 +1065,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 	// Health detail callback: hd:<node>
 	bot.callbackQuery(/^hd:(.+)$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
+		}
 		const node = ctx.match?.[1];
 		if (!node) return;
 		try {
@@ -1070,6 +1082,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 	// Health fix callback: hfix:<node>
 	bot.callbackQuery(/^hfix:(.+)$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
+		}
 		const node = ctx.match?.[1];
 		if (!node) return;
 		try {
