@@ -69,7 +69,11 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 				allowNull: false,
 			},
 			asn: {
-				type: DataTypes.INTEGER.UNSIGNED,
+				// BIGINT, not INTEGER: DN42 ASNs (e.g. 4242420998) exceed PG's
+				// signed 32-bit INTEGER max (~2.1e9). A fresh DB with INTEGER would
+				// fail to store them (bug-list #2). Returned as a number via the
+				// pg BIGINT type parser in dbContext.
+				type: DataTypes.BIGINT,
 				allowNull: false,
 			},
 			status: {

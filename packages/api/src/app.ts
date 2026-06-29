@@ -65,6 +65,9 @@ main();
 
 export default {
 	port: config.server.port,
-	hostname: "0.0.0.0",
+	// Was hardcoded "0.0.0.0", ignoring config.server.host (bug-list #7).
+	// config.server.host defaults to "0.0.0.0" so container behaviour is
+	// unchanged, but it can now be restricted via the HOST env var.
+	hostname: config.server.host,
 	fetch: app.fetch,
 };

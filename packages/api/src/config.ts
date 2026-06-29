@@ -5,7 +5,9 @@
 export default {
 	server: {
 		port: Number(process.env.PORT) || 3000,
-		host: process.env.HOST || "localhost",
+		// Default 0.0.0.0 so the API is reachable from the traefik/bot containers
+		// (the server binds this — see app.ts). Set HOST to restrict.
+		host: process.env.HOST || "0.0.0.0",
 	},
 
 	cors: {
