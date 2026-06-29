@@ -86,6 +86,19 @@ export async function initDatabase(): Promise<void> {
 	// /app/packages/api/src/db, so 4-up = /app likewise.
 	const migrationsDir = resolve(currentDir, "..", "..", "..", "..", "migrations");
 	await runMigrations(sequelize, models.settings, migrationsDir);
+
+	// Ensure a default BIRD policy exists. The agent's bird-config requires an
+	// isDefault policy; without one a fresh deployment gets "No default BIRD
+	// policy configured" and never sets up BIRD. Seed one from the model
+	// defaults (DN42 ASN, prefixes, two RPKI sources, limits, communities).
+	// findOrCreate leaves any existing default policy untouched.
+	const [, created] = await models.birdPolicies.findOrCreate({
+		where: { isDefault: true },
+		defaults: { name: "default", isDefault: true } as never,
+	});
+	if (created) {
+		console.log("[Seed] Created default BIRD policy");
+	}
 }
 
 export function getModels(): Models {
