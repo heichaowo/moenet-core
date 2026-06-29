@@ -170,6 +170,29 @@ MoeNet Agent uses direct kernel WireGuard interface management. Do NOT use `wg-q
 | `channel` | string | `stable` | Release channel: `stable`, `beta`, `dev` |
 | `githubRepo` | string | `heichaowo/moenet-agent` | GitHub repository for releases |
 
+::: tip Control-Plane controlled
+The Control Plane sends `enabled` to every agent in its config response, so
+auto-update is normally toggled centrally — set `AGENT_AUTOUPDATE=false` on the
+Control Plane to disable it fleet-wide (e.g. when pinning a custom binary, which
+the stable updater would otherwise revert). The updater verifies the downloaded
+binary's SHA256 against the release's `SHA256SUMS` and refuses to install on a
+mismatch.
+:::
+
+## BGP Policy (from the Control Plane)
+
+The agent does **not** hardcode BGP parameters — it fetches a policy from the
+Control Plane (`GET /api/v1/agent/:node/bird-config`) and renders BIRD from it:
+
+- **`local as`** for both eBGP (`dn42_peer`) and iBGP (`dn42_internal`) comes
+  from the policy's DN42 ASN.
+- **RPKI servers** are rendered from the policy's `rpkiServers` list (with a
+  fallback to `rpki.akae.re` if empty).
+
+This means a deployment can run its own ASN and RPKI sources purely by editing
+the `bird_policies` row on the Control Plane — no agent rebuild required. See
+[Deployment → First Run](/operations/deployment).
+
 ## Full Example
 
 See [config.example.json](https://github.com/heichaowo/moenet-agent/blob/main/configs/config.example.json) for the complete configuration file.
