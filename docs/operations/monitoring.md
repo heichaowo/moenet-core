@@ -9,6 +9,32 @@
 | Prometheus | 9090 | `prom.moenet.work` |
 | Grafana | 3002 | `grafana.moenet.work` |
 
+## Access & Authentication
+
+The monitoring endpoints are internet-facing through Traefik, so they must be
+protected:
+
+- **Prometheus** has no built-in authentication. It is fronted by a Traefik
+  HTTP **basic-auth** middleware — define it on the `prometheus` service labels
+  in `docker-compose.yml`:
+
+  ```yaml
+  labels:
+    - "traefik.http.routers.prometheus.middlewares=prom-auth"
+    - "traefik.http.middlewares.prom-auth.basicauth.users=admin:<htpasswd-hash>"
+  ```
+
+  Generate the hash with `openssl passwd -apr1 '<password>'` and escape every
+  `$` as `$$` in the compose file. Recreate the container to apply:
+  `docker compose up -d prometheus`.
+
+- **Grafana** uses its own admin login — set `GRAFANA_PASSWORD` in `.env`
+  (the compose no longer defaults it to `admin`).
+
+- **Agent API** (the CP-facing HTTP server on each node) must be firewalled to
+  the Control Plane's IP only — it authenticates with the agent API key, but
+  should not be reachable from the wider DN42 network.
+
 ## Health Checks
 
 ### API Health
