@@ -162,10 +162,14 @@ export function registerModifyHandlers(
     /**
      * Handle session type modify callbacks
      */
-    bot.callbackQuery(/^modify:sessionType:(.+):(.+)$/, async (ctx) => {
-        const uuid = ctx.match?.[1];
-        const newType = ctx.match?.[2];
-        if (!uuid || !newType) return;
+    bot.callbackQuery(/^modify:sessionType:(.+)$/, async (ctx) => {
+        const newType = ctx.match?.[1];
+        const uuid = ctx.session.peerFlow?.sessionUuid;
+        if (!newType) return;
+        if (!uuid) {
+            await ctx.answerCallbackQuery('❌ Session expired, run /modify again');
+            return;
+        }
 
         await ctx.answerCallbackQuery('Updating session type...');
 
@@ -241,10 +245,14 @@ export function registerModifyHandlers(
     /**
      * Handle Region migration callbacks
      */
-    bot.callbackQuery(/^modify:region:(.+):(.+)$/, async (ctx) => {
-        const sessionUuid = ctx.match?.[1];
-        const newNodeUuid = ctx.match?.[2];
-        if (!sessionUuid || !newNodeUuid) return;
+    bot.callbackQuery(/^modify:region:(.+)$/, async (ctx) => {
+        const newNodeUuid = ctx.match?.[1];
+        const sessionUuid = ctx.session.peerFlow?.sessionUuid;
+        if (!newNodeUuid) return;
+        if (!sessionUuid) {
+            await ctx.answerCallbackQuery('❌ Session expired, run /modify again');
+            return;
+        }
 
         await ctx.answerCallbackQuery('Migrating peer...');
 

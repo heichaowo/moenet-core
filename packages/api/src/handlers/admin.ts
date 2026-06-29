@@ -2434,8 +2434,21 @@ async function checkMigrationNotify(
 	const redis = getRedis();
 	const models = getModels();
 
-	// Scan for pending migration notification keys
-	const keys = await redis.keys("migrate:notify:*");
+	// Scan for pending migration notification keys. Use SCAN, not KEYS — KEYS is
+	// an O(N) command that blocks the whole Redis server across the keyspace.
+	const keys: string[] = [];
+	let cursor = "0";
+	do {
+		const [next, batch] = await redis.scan(
+			cursor,
+			"MATCH",
+			"migrate:notify:*",
+			"COUNT",
+			100,
+		);
+		cursor = next;
+		keys.push(...batch);
+	} while (cursor !== "0");
 	if (keys.length === 0) {
 		return success(c, { ready: [], pending: 0 });
 	}

@@ -2433,7 +2433,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                         keyboard = new InlineKeyboard();
                         for (const node of nodes) {
                             if (node.isOpen) { // Only open nodes
-                                keyboard.text(`📍 ${node.name}`, `modify:region:${uuid}:${node.uuid}`).row();
+                                // Session uuid is kept in session (set above), not in
+                                // callback_data — two UUIDs would exceed Telegram's
+                                // 64-byte callback_data limit.
+                                keyboard.text(`📍 ${node.name}`, `modify:region:${node.uuid}`).row();
                             }
                         }
                         keyboard.text('🚫 Cancel 取消', 'modify:cancel');
@@ -2441,17 +2444,17 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 } catch {
                     promptText = `❌ Failed to fetch nodes\n获取节点列表失败`;
                 }
-                ctx.session.peerFlow = undefined; // Uses buttons
                 break;
             case 'sessionType':
                 promptText = `⚙️ *Session Type*\nBGP 会话类型\n\n` +
                     `Select session type:\n选择会话类型:`;
+                // Session uuid kept in session (set above); callback carries only
+                // the type so callback_data stays under Telegram's 64-byte limit.
                 keyboard = new InlineKeyboard()
-                    .text('MP-BGP + ENH (推荐)', `modify:sessionType:${uuid}:mpbgp_enh`).row()
-                    .text('MP-BGP Only', `modify:sessionType:${uuid}:mpbgp`).row()
-                    .text('IPv6 + IPv4 独立会话', `modify:sessionType:${uuid}:separate`).row()
+                    .text('MP-BGP + ENH (推荐)', `modify:sessionType:mpbgp_enh`).row()
+                    .text('MP-BGP Only', `modify:sessionType:mpbgp`).row()
+                    .text('IPv6 + IPv4 独立会话', `modify:sessionType:separate`).row()
                     .text('🚫 Cancel 取消', 'modify:cancel');
-                ctx.session.peerFlow = undefined; // Uses buttons
                 break;
             case 'peerIpv6':
                 promptText = `🌐 *Modify Peer IPv6*\n修改对方 IPv6\n\n` +
