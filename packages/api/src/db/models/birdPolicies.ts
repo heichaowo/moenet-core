@@ -94,7 +94,13 @@ export function initBirdPoliciesModel(sequelize: Sequelize): BirdPoliciesModel {
 				field: "rpki_servers",
 				type: DataTypes.JSON,
 				allowNull: false,
-				defaultValue: [{ name: "default", host: "rpki.akae.re", port: 8082 }],
+				// Two standard DN42 RPKI sources for redundancy (matches what the
+				// agent historically hardcoded). Used when a default policy row is
+				// auto-seeded; existing rows are left untouched.
+				defaultValue: [
+					{ name: "akae", host: "rpki.akae.re", port: 8082 },
+					{ name: "launchpadx", host: "rpki.dn42.launchpadx.top", port: 8082 },
+				],
 			},
 			ebgpImportLimit: {
 				field: "ebgp_import_limit",
