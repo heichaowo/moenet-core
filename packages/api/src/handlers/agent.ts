@@ -718,7 +718,10 @@ async function handleConfig(
 			pingWorkers: 32,
 		},
 		autoUpdate: {
-			enabled: true,
+			// On by default (auto-update is the agent distribution mechanism);
+			// set AGENT_AUTOUPDATE=false on the CP to disable it fleet-wide so
+			// custom/local agent binaries aren't reverted (bug-list #10).
+			enabled: process.env.AGENT_AUTOUPDATE !== "false",
 			checkInterval: 60,
 			channel: "stable",
 			githubRepo: "heichaowo/moenet-agent",

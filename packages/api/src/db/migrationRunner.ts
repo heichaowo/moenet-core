@@ -65,16 +65,15 @@ export async function runMigrations(
 
 		console.log(`[Migrations] Running: ${file}`);
 		try {
-			// Execute the raw SQL (skip empty/comment-only files)
-			const statements = sql
-				.split(";")
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0 && !s.startsWith("--"));
-
-			for (const stmt of statements) {
-				// Skip transaction control — Sequelize handles this
-				if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(stmt)) continue;
-				await sequelize.query(stmt);
+			// Run the whole file as a single query. Splitting on ';' breaks
+			// dollar-quoted blocks (DO $$ ... END $$;) and function bodies; pg's
+			// simple query protocol (used when there are no bind params) executes
+			// all statements in the file, including transaction control.
+			const hasSql = sql
+				.split("\n")
+				.some((line) => line.trim().length > 0 && !line.trim().startsWith("--"));
+			if (hasSql) {
+				await sequelize.query(sql);
 			}
 
 			// Record as executed

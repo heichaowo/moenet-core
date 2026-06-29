@@ -28,7 +28,8 @@ export function initUsersModel(sequelize: Sequelize): UsersModel {
 				autoIncrement: true,
 			},
 			asn: {
-				type: DataTypes.INTEGER.UNSIGNED,
+				// BIGINT: DN42 ASNs exceed PG's 32-bit INTEGER max (bug-list #2).
+				type: DataTypes.BIGINT,
 				allowNull: false,
 				unique: true,
 			},
