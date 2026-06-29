@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import config from "./config";
@@ -13,6 +14,9 @@ const app = new Hono();
 // Middleware
 app.use("*", requestId());
 app.use("*", logger());
+// Cap request bodies (1 MB) to prevent memory-exhaustion DoS — all real
+// payloads here (agent sync, peer config) are far smaller.
+app.use("*", bodyLimit({ maxSize: 1024 * 1024 }));
 app.use("*", rateLimiter());
 app.use(
 	"*",
