@@ -117,6 +117,14 @@ export function registerModifyHandlers(
         const action = ctx.match?.[2];
         if (!uuid || !action) return;
 
+        // Ownership: must match the session opened via the ownership-checked
+        // /modify flow — otherwise a crafted callback could change another
+        // peer's PSK.
+        if (ctx.session.peerFlow?.sessionUuid !== uuid) {
+            await ctx.answerCallbackQuery('❌ Not your peer / 不是你的 Peer');
+            return;
+        }
+
         await ctx.answerCallbackQuery('Updating PSK...');
 
         try {
@@ -214,6 +222,13 @@ export function registerModifyHandlers(
         const uuid = ctx.match?.[1];
         const mtu = parseInt(ctx.match?.[2] || '1420', 10);
         if (!uuid) return;
+
+        // Ownership: must match the session opened via the ownership-checked
+        // /modify flow.
+        if (ctx.session.peerFlow?.sessionUuid !== uuid) {
+            await ctx.answerCallbackQuery('❌ Not your peer / 不是你的 Peer');
+            return;
+        }
 
         await ctx.answerCallbackQuery('Updating MTU...');
 

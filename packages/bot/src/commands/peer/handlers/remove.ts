@@ -71,6 +71,16 @@ export function registerRemoveHandlers(bot: Bot<BotContext>) {
         const uuid = ctx.match?.[1];
         if (!uuid) return;
 
+        // Ownership: this callback deletes a session, so it must match the one
+        // the user opened via the ownership-checked remove:select flow. Without
+        // this, a crafted remove:confirm:<any-uuid> would delete any peer,
+        // bypassing both the ownership check and the typed confirmation code.
+        if (ctx.session.peerFlow?.sessionUuid !== uuid
+            || ctx.session.peerFlow?.step !== 'remove_confirm') {
+            await ctx.answerCallbackQuery('❌ Not your peer / 不是你的 Peer');
+            return;
+        }
+
         await ctx.answerCallbackQuery('Removing...');
 
         try {
