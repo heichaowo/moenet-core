@@ -176,7 +176,7 @@ async function setBotCommands(bot: Bot<BotContext>) {
         { command: 'login', description: 'Login with ASN 登录' },
         { command: 'logout', description: 'Logout 登出' },
         { command: 'whoami', description: 'Show current session 当前登录' },
-        { command: 'peer', description: 'Create peer 建立连接' },
+        { command: 'peer', description: 'My peers / manage 我的连接' },
         { command: 'peers', description: 'List peers 连接列表' },
         { command: 'node', description: 'Nodes 节点列表' },
         { command: 'info', description: 'Peer status 连接状态' },
