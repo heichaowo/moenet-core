@@ -358,11 +358,12 @@ function startMigrationNotifyChecker(bot: Bot<BotContext>) {
                 toRouter: string;
                 adminChatId?: number;
                 serverEndpoint: string | null;
+                attempts: number;
             }>;
 
             if (ready.length === 0) return;
 
-            // Resolve ASNs to telegram IDs
+            // Resolve ASNs to delivery channels (Telegram + email).
             const asns = ready.map(r => r.asn);
             const targetsResult = await apiRequest('/admin', 'POST', {
                 action: 'getNotificationTargets',
@@ -372,78 +373,112 @@ function startMigrationNotifyChecker(bot: Bot<BotContext>) {
             if (targetsResult.code !== 0) return;
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const targets = ((targetsResult.data as any)?.targets || []) as Array<{ asn: number; telegramId: number }>;
-            const targetMap = new Map(targets.map(t => [t.asn, t.telegramId]));
+            const targets = ((targetsResult.data as any)?.targets || []) as Array<{ asn: number; telegramId?: number; emails?: string[] }>;
+            const targetMap = new Map(targets.map(t => [t.asn, t]));
 
-            // Track a per-ASN outcome so the admin gets a full breakdown. This is
-            // the ONLY record: checkMigrationNotify deletes the queue entry the
-            // moment the session is ENABLED, so a skipped/failed notify is not
-            // retried — the admin must be told exactly who to reach manually.
-            const outcomes: Array<{ asn: number; status: 'sent' | 'no_channel' | 'failed'; error?: string }> = [];
+            const MAX_ATTEMPTS = 5;
+            // Terminal outcomes only (delivered / gave-up / no-channel) are reported
+            // and acked; transient failures under the retry cap stay queued and are
+            // retried on the next tick (checkMigrationNotify no longer consumes on
+            // read). This is the fix for silently-lost notifications.
+            type Status = 'tg' | 'email' | 'no_channel' | 'gaveup';
+            const terminal: Array<{ asn: number; status: Status; error?: string }> = [];
+            const ackAsns: number[] = [];
+            let retrying = 0;
+
             for (const item of ready) {
-                const telegramId = targetMap.get(item.asn);
-                if (!telegramId) {
-                    outcomes.push({ asn: item.asn, status: 'no_channel' });
-                    continue;
+                const target = targetMap.get(item.asn);
+                const hasChannel = !!(target?.telegramId || target?.emails?.length);
+                let delivered: 'tg' | 'email' | null = null;
+                let error: string | undefined;
+
+                // 1. Telegram (primary)
+                if (target?.telegramId) {
+                    const endpointLine = item.serverEndpoint
+                        ? `🖥️ New Endpoint 新地址: \`${item.serverEndpoint}\`\n`
+                        : '';
+                    const message =
+                        `🔄 *Peer Migration Complete*\nPeer 迁移完成\n\n` +
+                        `Your peer \`AS${item.asn}\` has been successfully migrated:\n` +
+                        `您的 Peer \`AS${item.asn}\` 已成功迁移:\n\n` +
+                        `📍 From 原节点: \`${item.fromRouter}\`\n` +
+                        `📍 To 新节点: \`${item.toRouter}\`\n` +
+                        `${endpointLine}\n` +
+                        `⚠️ *Action Required 需要操作:*\n` +
+                        `Please update your WireGuard Endpoint.\n请更新 WireGuard Endpoint。\n` +
+                        `Use \`/info\` to view your full config.\n使用 \`/info\` 查看完整配置。`;
+                    try {
+                        await bot.api.sendMessage(target.telegramId, message, { parse_mode: 'Markdown' });
+                        delivered = 'tg';
+                    } catch (e) {
+                        error = e instanceof Error ? e.message : String(e);
+                        console.error(`[MigrateNotify] TG send failed AS${item.asn}:`, e);
+                    }
                 }
 
-                const endpointLine = item.serverEndpoint
-                    ? `🖥️ New Endpoint 新地址: \`${item.serverEndpoint}\`\n`
-                    : '';
+                // 2. Email (fallback when no TG or TG failed)
+                if (!delivered && target?.emails?.length) {
+                    try {
+                        const er = await apiRequest('/admin', 'POST', {
+                            action: 'sendMigrationEmail',
+                            email: target.emails[0],
+                            asn: item.asn,
+                            fromRouter: item.fromRouter,
+                            toRouter: item.toRouter,
+                            serverEndpoint: item.serverEndpoint,
+                        }, config.apiToken);
+                        if (er.code === 0) delivered = 'email';
+                        else error = er.message || 'email send failed';
+                    } catch (e) {
+                        error = e instanceof Error ? e.message : String(e);
+                    }
+                }
 
-                const message =
-                    `🔄 *Peer Migration Complete*\n` +
-                    `Peer 迁移完成\n\n` +
-                    `Your peer \`AS${item.asn}\` has been successfully migrated:\n` +
-                    `您的 Peer \`AS${item.asn}\` 已成功迁移:\n\n` +
-                    `📍 From 原节点: \`${item.fromRouter}\`\n` +
-                    `📍 To 新节点: \`${item.toRouter}\`\n` +
-                    `${endpointLine}\n` +
-                    `⚠️ *Action Required 需要操作:*\n` +
-                    `Please update your WireGuard Endpoint.\n` +
-                    `请更新 WireGuard Endpoint。\n` +
-                    `Use \`/info\` to view your full config.\n` +
-                    `使用 \`/info\` 查看完整配置。`;
-
-                try {
-                    await bot.api.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
-                    outcomes.push({ asn: item.asn, status: 'sent' });
-                } catch (e) {
-                    const error = e instanceof Error ? e.message : String(e);
-                    console.error(`[MigrateNotify] Failed to notify AS${item.asn}:`, e);
-                    outcomes.push({ asn: item.asn, status: 'failed', error });
+                // 3. Classify and decide whether to ack (consume) the queue entry.
+                if (delivered) {
+                    terminal.push({ asn: item.asn, status: delivered });
+                    ackAsns.push(item.asn);
+                } else if (!hasChannel) {
+                    terminal.push({ asn: item.asn, status: 'no_channel' });
+                    ackAsns.push(item.asn); // can never deliver — give up
+                } else if (item.attempts >= MAX_ATTEMPTS) {
+                    terminal.push({ asn: item.asn, status: 'gaveup', error });
+                    ackAsns.push(item.asn);
+                } else {
+                    retrying++; // leave queued for next tick
                 }
             }
 
-            const sentList = outcomes.filter(o => o.status === 'sent');
-            const noChannel = outcomes.filter(o => o.status === 'no_channel');
-            const failed = outcomes.filter(o => o.status === 'failed');
-            console.log(`[MigrateNotify] ${sentList.length} sent, ${noChannel.length} no-channel, ${failed.length} failed`);
+            // Consume the finished entries (two-phase: ack only what's done).
+            if (ackAsns.length > 0) {
+                await apiRequest('/admin', 'POST', { action: 'ackMigrationNotify', asns: ackAsns }, config.apiToken);
+            }
+            console.log(`[MigrateNotify] terminal=${terminal.length} (acked ${ackAsns.length}), retrying=${retrying}`);
 
-            // Always report to admin when there was anything to notify — even if
-            // everything failed (previously a total failure was silent).
+            // Report only terminal outcomes — retrying items stay quiet until they
+            // resolve, so the admin isn't spammed every 60s.
             const adminChatId = ready[0]?.adminChatId || config.adminChatId;
-            if (adminChatId && outcomes.length > 0) {
-                const asnList = (arr: typeof outcomes) => arr.map(o => `\`AS${o.asn}\``).join(' ');
+            if (adminChatId && terminal.length > 0) {
+                const list = (s: Status) => terminal.filter(o => o.status === s).map(o => `\`AS${o.asn}\``).join(' ');
+                const tg = terminal.filter(o => o.status === 'tg');
+                const em = terminal.filter(o => o.status === 'email');
+                const nc = terminal.filter(o => o.status === 'no_channel');
+                const gu = terminal.filter(o => o.status === 'gaveup');
+
                 let summary =
                     `📬 *Migration Notifications 迁移通知结果*\n\n` +
-                    `✅ Sent 已发送: *${sentList.length}*  ·  ⚠️ No TG 未绑定: *${noChannel.length}*  ·  ❌ Failed 失败: *${failed.length}*\n`;
-
-                if (sentList.length) summary += `\n✅ ${asnList(sentList)}\n`;
-                if (noChannel.length) {
-                    summary += `\n⚠️ *No Telegram linked 未绑定 TG:*\n${asnList(noChannel)}\n`;
+                    `✅ TG: *${tg.length}*  ·  📧 Email: *${em.length}*  ·  ⚠️ No channel: *${nc.length}*  ·  ❌ Gave up: *${gu.length}*\n`;
+                if (tg.length) summary += `\n✅ Telegram: ${list('tg')}\n`;
+                if (em.length) summary += `\n📧 Email fallback 邮件: ${list('email')}\n`;
+                if (nc.length) summary += `\n⚠️ *No channel (no TG & no email) 无渠道:*\n${list('no_channel')}\n`;
+                if (gu.length) {
+                    summary += `\n❌ *Gave up after ${MAX_ATTEMPTS} tries 放弃:*\n`;
+                    for (const o of gu) summary += `   • \`AS${o.asn}\`: \`${(o.error || 'unknown').replace(/`/g, "'")}\`\n`;
                 }
-                if (failed.length) {
-                    summary += `\n❌ *Failed 发送失败:*\n`;
-                    for (const o of failed) {
-                        // Wrap the raw error in backticks (neutralise its markdown).
-                        summary += `   • \`AS${o.asn}\`: \`${(o.error || 'unknown').replace(/`/g, "'")}\`\n`;
-                    }
-                }
-                if (noChannel.length || failed.length) {
-                    summary +=
-                        `\n⚠️ _These users were NOT notified and the queue entry is already consumed (no auto-retry). Reach them via /notify if needed._\n` +
-                        `_以上用户未收到通知，且通知已消费不会重试；如需请用 /notify 手动通知。_`;
+                if (retrying > 0) summary += `\n🔁 _${retrying} still retrying…_\n`;
+                if (nc.length || gu.length) {
+                    summary += `\n⚠️ _Above users were NOT reached — follow up manually via /notify._\n` +
+                        `_以上用户未送达，请用 /notify 手动跟进。_`;
                 }
                 await bot.api.sendMessage(adminChatId, summary, { parse_mode: 'Markdown' });
             }

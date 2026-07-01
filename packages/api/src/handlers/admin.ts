@@ -167,6 +167,10 @@ export default async function adminHandler(c: Context): Promise<Response> {
 			return await storeMigrationNotify(c, body);
 		case "checkMigrationNotify":
 			return await checkMigrationNotify(c, body);
+		case "ackMigrationNotify":
+			return await ackMigrationNotify(c, body);
+		case "sendMigrationEmail":
+			return await sendMigrationEmail(c, body);
 		default:
 			return makeResponse(
 				c,
@@ -2587,6 +2591,7 @@ async function checkMigrationNotify(
 		toRouter: string;
 		adminChatId?: number;
 		serverEndpoint: string | null;
+		attempts: number;
 	}> = [];
 
 	for (const key of keys) {
@@ -2600,6 +2605,7 @@ async function checkMigrationNotify(
 			fromRouter: string;
 			toRouter: string;
 			adminChatId?: number;
+			attempts?: number;
 		};
 
 		// Check if this ASN has an ENABLED session (setup completed)
@@ -2628,18 +2634,82 @@ async function checkMigrationNotify(
 				serverEndpoint = `[${publicIpv6}]:${listenPort}`;
 			}
 
+			const attempts = (data.attempts ?? 0) + 1;
 			ready.push({
 				asn,
 				fromRouter: data.fromRouter,
 				toRouter: data.toRouter,
 				adminChatId: data.adminChatId,
 				serverEndpoint,
+				attempts,
 			});
 
-			// Clean up — notification consumed
-			await redis.del(key);
+			// Do NOT delete here — the bot acks (ackMigrationNotify) only after it
+			// confirms delivery, so a failed/skipped send retries next tick instead
+			// of being lost. Bump the attempt counter, preserving the original TTL
+			// (KEEPTTL) so the entry still auto-expires after 24h as a backstop.
+			await redis.set(key, JSON.stringify({ ...data, attempts }), "KEEPTTL");
 		}
 	}
 
 	return success(c, { ready, pending: keys.length - ready.length });
+}
+
+/**
+ * Delete migration-notify queue entries the bot has finished with (delivered, or
+ * given up after exhausting retries). This is the second half of the two-phase
+ * delivery: checkMigrationNotify no longer consumes on read.
+ */
+async function ackMigrationNotify(
+	c: Context,
+	body: { asns?: number[] },
+): Promise<Response> {
+	const asns = body.asns;
+	if (!Array.isArray(asns) || asns.length === 0) {
+		return success(c, { acked: 0 });
+	}
+	const redis = getRedis();
+	let acked = 0;
+	for (const asn of asns) {
+		const n = await redis.del(`migrate:notify:${Number(asn)}`);
+		acked += n;
+	}
+	return success(c, { acked });
+}
+
+/**
+ * Send a migration notification to a peer by email (fallback channel when the
+ * user has no linked Telegram, or Telegram delivery failed).
+ */
+async function sendMigrationEmail(
+	c: Context,
+	body: {
+		email?: string;
+		asn?: number;
+		fromRouter?: string;
+		toRouter?: string;
+		serverEndpoint?: string | null;
+	},
+): Promise<Response> {
+	const { email, asn, fromRouter, toRouter, serverEndpoint } = body;
+	if (!email || !asn) {
+		return makeResponse(c, ResponseCode.VALIDATION_ERROR, undefined, "Missing email or asn");
+	}
+	const provider = getEmailProvider();
+	if (!provider.isEnabled()) {
+		return makeResponse(c, ResponseCode.INTERNAL_ERROR, undefined, "Email not configured");
+	}
+
+	const subject = `[MoeNet DN42] Peer Migrated — AS${asn}`;
+	const text =
+		`Your peer AS${asn} has been migrated from ${fromRouter ?? "?"} to ${toRouter ?? "?"}.\n\n` +
+		(serverEndpoint ? `New server endpoint: ${serverEndpoint}\n\n` : "") +
+		`Action required: please update your WireGuard Endpoint. ` +
+		`Use /info in the MoeNet bot to view your full config.`;
+
+	const result = await provider.send({ to: email, subject, text });
+	if (!result.success) {
+		return makeResponse(c, ResponseCode.INTERNAL_ERROR, undefined, result.error || "Email send failed");
+	}
+	return success(c, { sent: true });
 }
