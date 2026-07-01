@@ -1,16 +1,19 @@
 /**
  * Peer UI Components
- * 
- * Reusable UI prompt functions for peer creation and modification flows.
- * Uses ReplyKeyboard for wizard steps (better UX) and InlineKeyboard only for final confirmation.
+ *
+ * Reusable UI prompt functions for the peer creation wizard.
+ * Fully inline-keyboard driven: selection steps use InlineKeyboard callbacks
+ * (handled in handlers/creation.ts); free-text steps (IPv6 / endpoint / pubkey /
+ * manual contact) prompt for typed input. No ReplyKeyboards — they persist in
+ * the client and leak between steps (the old "Continue → Invalid node" bug).
  */
 
-import { Keyboard, InlineKeyboard } from 'grammy';
+import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../../index';
 import { fetchContacts } from '../../services/dn42Registry';
 
 /**
- * Show server WireGuard info with ReplyKeyboard continue button
+ * Show server WireGuard info with an inline Continue button.
  */
 export async function showServerWgInfo(ctx: BotContext): Promise<void> {
     const flow = ctx.session.peerFlow;
@@ -25,32 +28,25 @@ export async function showServerWgInfo(ctx: BotContext): Promise<void> {
         `请使用以上信息配置你的 WireGuard\n` +
         `Use above info to configure your WireGuard`;
 
-    // Use ReplyKeyboard for wizard flow
-    const keyboard = new Keyboard()
-        .text('Continue ➡️ 继续')
-        .resized()
-        .oneTime();
-
     ctx.session.peerFlow = { ...flow, step: 'await_continue' };
 
+    const keyboard = new InlineKeyboard().text('Continue ➡️ 继续', 'peer:continue');
     await ctx.reply(infoText, { parse_mode: 'Markdown', reply_markup: keyboard });
 }
 
 /**
- * Prompt for session type selection with ReplyKeyboard
+ * Prompt for session type selection (inline).
  */
 export async function promptSessionType(ctx: BotContext): Promise<void> {
     const flow = ctx.session.peerFlow;
     if (!flow) return;
 
-    const keyboard = new Keyboard()
-        .text('MP-BGP + ENH (推荐)')
-        .row()
-        .text('ULA/GUA 模式')
-        .resized()
-        .oneTime();
-
     ctx.session.peerFlow = { ...flow, step: 'select_session_type' };
+
+    const keyboard = new InlineKeyboard()
+        .text('MP-BGP + ENH (推荐)', 'peer:stype:enh')
+        .row()
+        .text('ULA/GUA 模式', 'peer:stype:ula');
 
     await ctx.reply(
         `📡 *Session Type 会话类型*\n\n` +
@@ -67,27 +63,22 @@ export async function promptSessionType(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Prompt for IPv6 input with ReplyKeyboard suggestion.
+ * Prompt for Link-Local IPv6 input (typed).
  * NOTE: Caller must set peerFlow.step before calling this function.
  */
 export async function promptIpv6(ctx: BotContext, suggested: string): Promise<void> {
-    const keyboard = suggested
-        ? new Keyboard().text(suggested).resized().oneTime()
-        : undefined;
-
     await ctx.reply(
         `📝 *Peer IPv6 Address 对方 IPv6 地址*\n\n` +
         `Enter your Link-Local IPv6 address for BGP peering.\n` +
         `请输入你用于 BGP 对等的 Link-Local IPv6 地址。\n\n` +
-        (suggested ? `Suggested 建议: \`${suggested}\`\n` : '') +
-        `You can also enter a custom Link-Local address.\n` +
-        `你也可以输入其他 Link-Local 地址。`,
-        { parse_mode: 'Markdown', reply_markup: keyboard }
+        (suggested ? `Suggested 建议: \`${suggested}\`\n(copy & send, or enter your own)\n` : '') +
+        `例如 / e.g. \`fe80::1234\``,
+        { parse_mode: 'Markdown', reply_markup: { remove_keyboard: true } }
     );
 }
 
 /**
- * Prompt for ULA/GUA IPv6 input (no keyboard needed).
+ * Prompt for ULA/GUA IPv6 input (typed).
  */
 export async function promptUlaIpv6(ctx: BotContext): Promise<void> {
     await ctx.reply(
@@ -101,28 +92,24 @@ export async function promptUlaIpv6(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Prompt for endpoint input with ReplyKeyboard
+ * Prompt for endpoint input (typed) with an inline None (NAT) button.
  */
 export async function promptEndpoint(ctx: BotContext): Promise<void> {
-    const keyboard = new Keyboard()
-        .text('None (NAT)')
-        .resized()
-        .oneTime();
-
+    const keyboard = new InlineKeyboard().text('🚫 None (NAT)', 'peer:endpoint:none');
     await ctx.reply(
         `📝 *Step 2: WireGuard Endpoint*\n第二步: WireGuard 端点\n\n` +
         `Input your clearnet address for WireGuard tunnel.\n` +
         `请输入你的公网地址用于 WireGuard 隧道。\n\n` +
         `You can use IPv4 or IPv6. Include port if needed.\n` +
         `可使用 IPv4 或 IPv6，可包含端口如 \`example.com:51820\`\n\n` +
-        `If behind NAT with no public IP, click "None".\n` +
+        `If behind NAT with no public IP, tap "None".\n` +
         `如果在 NAT 后无公网 IP，点击 "None"。`,
         { parse_mode: 'Markdown', reply_markup: keyboard }
     );
 }
 
 /**
- * Prompt for public key input (text only, no keyboard needed)
+ * Prompt for public key input (typed).
  */
 export async function promptPubkey(ctx: BotContext): Promise<void> {
     await ctx.reply(
@@ -136,15 +123,13 @@ export async function promptPubkey(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Prompt for MTU selection with ReplyKeyboard
+ * Prompt for MTU selection (inline).
  */
 export async function promptMtu(ctx: BotContext): Promise<void> {
-    const keyboard = new Keyboard()
-        .text('1420 (默认)').text('1400')
+    const keyboard = new InlineKeyboard()
+        .text('1420 (默认)', 'peer:mtu:1420').text('1400', 'peer:mtu:1400')
         .row()
-        .text('1380').text('1280')
-        .resized()
-        .oneTime();
+        .text('1380', 'peer:mtu:1380').text('1280', 'peer:mtu:1280');
 
     await ctx.reply(
         `📝 *Step 4: MTU Setting*\n第四步: MTU 设置\n\n` +
@@ -158,15 +143,13 @@ export async function promptMtu(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Prompt for PSK option with ReplyKeyboard
+ * Prompt for PSK option (inline).
  */
 export async function promptPsk(ctx: BotContext): Promise<void> {
-    const keyboard = new Keyboard()
-        .text('🔄 Auto Generate 自动生成')
+    const keyboard = new InlineKeyboard()
+        .text('🔄 Auto Generate 自动生成', 'peer:psk:auto')
         .row()
-        .text('❌ No PSK 不使用')
-        .resized()
-        .oneTime();
+        .text('❌ No PSK 不使用', 'peer:psk:none');
 
     await ctx.reply(
         `📝 *Step 5: Pre-Shared Key (PSK)*\n第五步: 预共享密钥\n\n` +
@@ -178,10 +161,10 @@ export async function promptPsk(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Prompt for contact selection with ReplyKeyboard.
- * 
- * Fetches NOC contacts from Burble DN42 registry and presents
- * them as keyboard options, with manual input and skip fallbacks.
+ * Prompt for contact selection (inline).
+ *
+ * Fetches NOC contacts from the DN42 registry and presents them as inline
+ * buttons (peer:ct:<index>, options kept in session), plus manual/skip.
  */
 export async function promptContact(ctx: BotContext): Promise<void> {
     const flow = ctx.session.peerFlow;
@@ -194,27 +177,17 @@ export async function promptContact(ctx: BotContext): Promise<void> {
 
     const contacts = await fetchContacts(asn);
 
-    const keyboard = new Keyboard();
-
-    if (contacts.length > 0) {
-        // Add each contact as a button
-        for (const contact of contacts) {
-            keyboard.text(contact).row();
-        }
-    }
-
-    keyboard
-        .text('✏️ Manual input 手动输入')
+    const keyboard = new InlineKeyboard();
+    contacts.forEach((c, i) => keyboard.text(c, `peer:ct:${i}`).row());
+    keyboard.text('✏️ Manual input 手动输入', 'peer:ct:manual')
         .row()
-        .text('⏩ Skip 跳过')
-        .resized()
-        .oneTime();
+        .text('⏩ Skip 跳过', 'peer:ct:skip');
 
     const contactList = contacts.length > 0
         ? `Found contacts 找到的联系方式:\n${contacts.map(c => `• \`${c}\``).join('\n')}\n\n`
         : 'No contacts found in registry.\n未在注册表中找到联系方式。\n\n';
 
-    ctx.session.peerFlow = { ...flow, step: 'input_contact' };
+    ctx.session.peerFlow = { ...flow, step: 'input_contact', contactOptions: contacts };
 
     await ctx.reply(
         `📞 *Step 6: Contact Info*\n第六步: 联系方式\n\n` +
@@ -226,7 +199,7 @@ export async function promptContact(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Show confirmation screen (keeps InlineKeyboard for final action)
+ * Show confirmation screen (inline).
  */
 export async function showConfirmation(ctx: BotContext): Promise<void> {
     const flow = ctx.session.peerFlow;
@@ -260,7 +233,6 @@ export async function showConfirmation(ctx: BotContext): Promise<void> {
         `Click button or type \`yes\` to confirm.\n` +
         `点击按钮或输入 \`yes\` 确认。`;
 
-    // Keep InlineKeyboard for final confirmation action
     const keyboard = new InlineKeyboard()
         .text('✅ Confirm 确认', 'peer:confirm')
         .text('❌ Cancel 取消', 'peer:cancel');
