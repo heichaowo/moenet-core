@@ -49,6 +49,7 @@ export interface BgpSessionAttributes {
 	data: string | null;
 	contact: string | null;
 	lastError: string | null;
+	observedEndpoint: string | null;
 	createdAt?: Date;
 	updatedAt?: Date;
 }
@@ -143,6 +144,11 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 			},
 			lastError: {
 				field: "last_error",
+				type: DataTypes.STRING,
+				allowNull: true,
+			},
+			observedEndpoint: {
+				field: "observed_endpoint",
 				type: DataTypes.STRING,
 				allowNull: true,
 			},
