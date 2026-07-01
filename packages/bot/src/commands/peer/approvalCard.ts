@@ -26,8 +26,13 @@ export interface ApprovalCardInput {
 	sessionType?: "ipv6_only" | "ipv6_ipv4";
 }
 
+/** Unwrap a `[text](url)` Markdown link to just `text` (the registry service
+ *  pre-formats some whois attrs as links, which we don't want in the card). */
+const plain = (s: string): string => s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+
 /** Wrap a dynamic value as inline code (safe from Markdown parsing). */
-const code = (s: unknown): string => `\`${String(s ?? "").replace(/`/g, "'")}\``;
+const code = (s: unknown): string =>
+	`\`${plain(String(s ?? "")).replace(/`/g, "'")}\``;
 
 function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 	return Promise.race([
