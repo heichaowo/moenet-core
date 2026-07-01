@@ -378,9 +378,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
                 msgText += statusLines + '\n';
 
-                // Add to selectable list if open and has capacity
+                // Add to selectable list if open and has capacity. Admin can add
+                // to any node, including closed/full ones.
                 const hasCapacity = max === 0 || current < max;
-                if (r.isOpen && hasCapacity) {
+                if (adminMode || (r.isOpen && hasCapacity)) {
                     couldPeer.push(label);
                     nodeMap[label] = {
                         uuid: r.uuid,
