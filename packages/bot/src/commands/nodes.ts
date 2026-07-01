@@ -114,6 +114,12 @@ export function registerNodeCommands(bot: Bot<BotContext>) {
         await showNodeList(ctx, ctx.callbackQuery.message?.message_id);
     });
 
+    // Close (dismiss the node UI).
+    bot.callbackQuery('node:close', async (ctx) => {
+        await ctx.answerCallbackQuery();
+        try { await ctx.deleteMessage(); } catch { /* already gone */ }
+    });
+
     // View a node's detail card.
     bot.callbackQuery(/^node:v:(.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery();
@@ -402,7 +408,7 @@ async function showNodeList(ctx: BotContext, editMessageId?: number) {
     });
     keyboard.row();
     if (admin) keyboard.text('➕ Add Node', 'node:add');
-    keyboard.text('🔄 Refresh', 'node:list');
+    keyboard.text('🔄 Refresh', 'node:list').text('❌ Close', 'node:close');
 
     if (editMessageId) {
         try {
