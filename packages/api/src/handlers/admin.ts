@@ -540,7 +540,12 @@ async function regenerateBootstrapToken(
 
 	const router = await models.routers.findOne({ where: whereClause });
 	if (!router) {
-		return makeResponse(c, ResponseCode.NOT_FOUND, undefined, "Router not found");
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Router not found",
+		);
 	}
 
 	// 24 url-safe chars (fits the STRING(32) column).
@@ -832,7 +837,12 @@ async function deleteSessionAdmin(
 		where: { uuid: body.uuid },
 	});
 	if (!session) {
-		return makeResponse(c, ResponseCode.NOT_FOUND, undefined, "Session not found");
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Session not found",
+		);
 	}
 
 	// The normal teardown just marks QUEUED_FOR_DELETE and waits for the node's
@@ -1017,7 +1027,8 @@ async function updateSessionAdmin(
 	// way as psk. Read from updateData.credential if psk already touched it.
 	if ("publicKey" in updates || "pubkey" in updates) {
 		const pub = (updates.publicKey ?? updates.pubkey) as string;
-		const base = (updateData.credential as string) ??
+		const base =
+			(updateData.credential as string) ??
 			(session.get("credential") as string | null);
 		let credObj: Record<string, unknown> = {};
 		if (base) {
@@ -2389,16 +2400,15 @@ async function getNotificationTargets(
 							defaults: {
 								asn: item.asn,
 								telegramId: resolvedId,
-								username: item.username,
 								isAdmin: false,
 								isBlocked: false,
-							} as Record<string, unknown>,
+								// biome-ignore lint/suspicious/noExplicitAny: id is auto-increment
+							} as any,
 						})
 						.then(([user, created]) => {
 							if (!created) {
 								user.update({
 									telegramId: resolvedId,
-									username: item.username,
 								});
 							}
 						})
@@ -2709,11 +2719,21 @@ async function sendMigrationEmail(
 ): Promise<Response> {
 	const { email, asn, fromRouter, toRouter, serverEndpoint } = body;
 	if (!email || !asn) {
-		return makeResponse(c, ResponseCode.VALIDATION_ERROR, undefined, "Missing email or asn");
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"Missing email or asn",
+		);
 	}
 	const provider = getEmailProvider();
 	if (!provider.isEnabled()) {
-		return makeResponse(c, ResponseCode.INTERNAL_ERROR, undefined, "Email not configured");
+		return makeResponse(
+			c,
+			ResponseCode.INTERNAL_ERROR,
+			undefined,
+			"Email not configured",
+		);
 	}
 
 	const subject = `[MoeNet DN42] Peer Migrated — AS${asn}`;
@@ -2725,7 +2745,12 @@ async function sendMigrationEmail(
 
 	const result = await provider.send({ to: email, subject, text });
 	if (!result.success) {
-		return makeResponse(c, ResponseCode.INTERNAL_ERROR, undefined, result.error || "Email send failed");
+		return makeResponse(
+			c,
+			ResponseCode.INTERNAL_ERROR,
+			undefined,
+			result.error || "Email send failed",
+		);
 	}
 	return success(c, { sent: true });
 }

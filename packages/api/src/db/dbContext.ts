@@ -10,6 +10,7 @@ import config from "../config";
 // 2^53 safe range. Returning numbers keeps asn comparisons/Map keys working
 // once asn columns move from INTEGER to BIGINT (bug-list #2).
 pg.types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
+
 import { runMigrations } from "./migrationRunner";
 import { type AuditLogsModel, initAuditLogsModel } from "./models/auditLogs";
 // Model imports
@@ -84,7 +85,14 @@ export async function initDatabase(): Promise<void> {
 	// exist, so migrations never ran — bug-list #3). In the Docker image the
 	// Dockerfile copies migrations/ to /app/migrations, and the code runs from
 	// /app/packages/api/src/db, so 4-up = /app likewise.
-	const migrationsDir = resolve(currentDir, "..", "..", "..", "..", "migrations");
+	const migrationsDir = resolve(
+		currentDir,
+		"..",
+		"..",
+		"..",
+		"..",
+		"migrations",
+	);
 	await runMigrations(sequelize, models.settings, migrationsDir);
 
 	// Ensure a default BIRD policy exists. The agent's bird-config requires an

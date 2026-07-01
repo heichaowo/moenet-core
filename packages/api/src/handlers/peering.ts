@@ -1,6 +1,10 @@
 import type { Context } from "hono";
 import { verify } from "hono/jwt";
-import { generateUUID, getInterfaceName, getListenPort } from "../common/helpers";
+import {
+	generateUUID,
+	getInterfaceName,
+	getListenPort,
+} from "../common/helpers";
 import { makeResponse, ResponseCode, success } from "../common/response";
 import config from "../config";
 import { getModels } from "../db/dbContext";
@@ -73,17 +77,6 @@ export default async function peeringHandler(c: Context): Promise<Response> {
 				"Invalid action",
 			);
 	}
-}
-
-interface CreateSessionRequest {
-	router: string;
-	endpoint?: string;
-	publicKey?: string;
-	ipv4?: string;
-	ipv6?: string;
-	ipv6LinkLocal?: string;
-	mtu?: number;
-	extensions?: string[];
 }
 
 /**

@@ -58,7 +58,9 @@ export async function runMigrations(
 
 		const pending = files.filter((f) => !executedSet.has(f));
 		if (pending.length === 0) {
-			console.log(`[Migrations] All ${files.length} migrations already applied`);
+			console.log(
+				`[Migrations] All ${files.length} migrations already applied`,
+			);
 			return;
 		}
 
@@ -79,8 +81,7 @@ export async function runMigrations(
 				const hasSql = sql
 					.split("\n")
 					.some(
-						(line) =>
-							line.trim().length > 0 && !line.trim().startsWith("--"),
+						(line) => line.trim().length > 0 && !line.trim().startsWith("--"),
 					);
 				if (hasSql) {
 					await sequelize.query(sql);

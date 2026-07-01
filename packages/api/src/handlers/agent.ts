@@ -391,7 +391,12 @@ async function handleModify(c: Context, router: string): Promise<Response> {
 		attributes: ["status"],
 	});
 	if (!existing) {
-		return makeResponse(c, ResponseCode.NOT_FOUND, undefined, "Session not found");
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Session not found",
+		);
 	}
 	const currentStatus = existing.get("status") as PeeringStatus;
 	const newStatus = status as PeeringStatus;
