@@ -208,6 +208,7 @@ async function request(
 		// Send verification code email
 		const emailProvider = getEmailProvider();
 		const result = await emailProvider.sendVerificationCode(
+			// biome-ignore lint/style/noNonNullAssertion: EMAIL auth always carries data
 			authMethod.data!,
 			typeof state.asn === "string"
 				? Number(state.asn)
