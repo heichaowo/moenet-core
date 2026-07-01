@@ -76,6 +76,11 @@ interface SessionData {
         step: 'name' | 'hostname' | 'ipv4' | 'ipv6' | 'role' | 'region' | 'location' | 'provider' | 'bandwidth' | 'max_peers' | 'allow_cn' | 'confirm';
         data: Record<string, unknown>;
     };
+    /** Awaiting a text value for an admin edit of a node field (via /node). */
+    nodeEdit?: {
+        name: string;
+        field: 'location' | 'provider' | 'maxPeers';
+    };
     /** Announce flow: message + router UUID order for bitmask */
     announceFlow?: {
         message?: string;
@@ -168,6 +173,7 @@ async function setBotCommands(bot: Bot<BotContext>) {
         { command: 'whoami', description: 'Show current session 当前登录' },
         { command: 'peer', description: 'Create peer 建立连接' },
         { command: 'peers', description: 'List peers 连接列表' },
+        { command: 'node', description: 'Nodes 节点列表' },
         { command: 'info', description: 'Peer status 连接状态' },
         { command: 'modify', description: 'Modify peer 修改连接' },
         { command: 'remove', description: 'Remove peer 删除连接' },
@@ -196,15 +202,12 @@ async function setBotCommands(bot: Bot<BotContext>) {
         await bot.api.setMyCommands([
             { command: 'pending', description: 'Pending reviews 待审核' },
             { command: 'sessions', description: 'All sessions 所有会话' },
-            { command: 'nodes', description: 'Node list 节点列表' },
-            { command: 'addnode', description: 'Add router 添加节点' },
             { command: 'addpeer', description: 'Admin add peer 管理加连接' },
             { command: 'migrate', description: 'Bulk migrate 批量迁移' },
             { command: 'announce', description: 'Broadcast message 全员公告' },
             { command: 'notify', description: 'Notify users 定向通知' },
             { command: 'block', description: 'Block ASN 封禁' },
             { command: 'unblock', description: 'Unblock ASN 解封' },
-            { command: 'main', description: 'Maintenance mode 维护模式' },
         ], { scope: { type: 'chat', chat_id: Number(config.adminChatId) } });
     }
 }

@@ -41,23 +41,60 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 	]);
 }
 
+/**
+ * Result of evaluating a peer request.
+ * - `card`: the rendered admin notification (Markdown).
+ * - `autoApprove`: true when no *hard blocker* is present, so the request can
+ *   skip manual review (lenient policy — see below).
+ * - `reasons`: human-readable hard-blocker descriptions (empty when autoApprove).
+ */
+export interface PeerEvaluation {
+	card: string;
+	autoApprove: boolean;
+	reasons: string[];
+}
+
 export async function buildApprovalCard(
 	input: ApprovalCardInput,
 ): Promise<string> {
+	return (await evaluatePeerRequest(input)).card;
+}
+
+/**
+ * Evaluate a peer request: render the decision card AND decide whether it can be
+ * auto-approved under the lenient policy.
+ *
+ * Hard blockers (→ manual review): the peer's declared IPv6 is not provably in
+ * their DN42 registry pool (anti-spoofing — this is the one thing we must verify,
+ * and a timeout counts as unverified), or a resolvable endpoint geolocates to CN
+ * on a node that rejects CN peers. Everything else — registry-not-found, NAT
+ * (no endpoint to check), non-standard method, unresolved endpoint — is a soft
+ * warning that still auto-approves; NAT peers are backstopped by the runtime
+ * CN/region enforcement that disables them if they connect from a bad IP.
+ *
+ * Any unexpected failure fails safe to manual review.
+ */
+export async function evaluatePeerRequest(
+	input: ApprovalCardInput,
+): Promise<PeerEvaluation> {
 	try {
-		return await buildCard(input);
+		return await evaluate(input);
 	} catch (e) {
-		// Never let a verification failure block/garble the admin notification.
-		console.error("[ApprovalCard] build failed, using fallback:", e);
-		return (
-			`🔔 *New Peer Request* — ${code(`AS${input.asn}`)}\n` +
-			`📍 Node: ${code(input.routerName ?? "?")}\n` +
-			`_Verification checks unavailable — use /pending to review._`
-		);
+		// Never let a verification failure block/garble the admin notification —
+		// and never auto-approve on an error path.
+		console.error("[ApprovalCard] evaluation failed, using fallback:", e);
+		return {
+			card:
+				`🔔 *New Peer Request* — ${code(`AS${input.asn}`)}\n` +
+				`📍 Node: ${code(input.routerName ?? "?")}\n` +
+				`_Verification checks unavailable — use /pending to review._`,
+			autoApprove: false,
+			reasons: ["verification checks unavailable"],
+		};
 	}
 }
 
-async function buildCard(input: ApprovalCardInput): Promise<string> {
+async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 	const { asn } = input;
 
 	const [whois, peerOwn, localOwn, endpointIp] = await Promise.all([
@@ -140,7 +177,26 @@ async function buildCard(input: ApprovalCardInput): Promise<string> {
 
 	if (input.publicKey) lines.push(`🔑 PubKey: ${code(input.publicKey)}`);
 
+	// --- Lenient auto-approve decision ---
+	// Hard blocker 1: the peer's declared IPv6 must be provably in their DN42
+	// registry pool. A missing check (no ipv6) or a failed/timed-out one counts
+	// as unverified — we do not auto-approve on faith.
+	const reasons: string[] = [];
+	if (!peerOwn || !peerOwn.valid) {
+		reasons.push("peer IPv6 ownership unverified");
+	}
+	// Hard blocker 2: a resolvable endpoint that geolocates to CN on a node that
+	// rejects CN peers. (NAT peers have no endpoint here — handled at runtime.)
+	if (endpointIp && isChinaIP(endpointIp) && input.nodeAllowCn === false) {
+		reasons.push("endpoint is a CN IP on a node that rejects CN peers");
+	}
+	const autoApprove = reasons.length === 0;
+
 	lines.push("");
-	lines.push("_Use /pending to review all_");
-	return lines.join("\n");
+	lines.push(
+		autoApprove
+			? "🟢 _All hard checks passed — eligible for auto-approve_"
+			: `🟡 _Needs review: ${reasons.join("; ")}_`,
+	);
+	return { card: lines.join("\n"), autoApprove, reasons };
 }

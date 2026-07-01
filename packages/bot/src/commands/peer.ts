@@ -8,7 +8,7 @@ import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../serv
 import { DIVIDER } from '../templates';
 import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
 import { isAdmin } from '../guards';
-import { buildApprovalCard } from './peer/approvalCard';
+import { evaluatePeerRequest } from './peer/approvalCard';
 
 // Import from new peer module
 import {
@@ -333,8 +333,67 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         }
     });
 
+    /**
+     * "Peer here" — entry from the /node detail card. Pre-selects a node and
+     * jumps straight to the WireGuard-info step, exactly like /peer auto-selecting
+     * a single available node.
+     */
+    bot.callbackQuery(/^peer:here:(.+)$/, async (ctx) => {
+        const name = ctx.match[1]!;
+        if (!ctx.session.asn) {
+            await ctx.answerCallbackQuery();
+            await ctx.reply('❌ Please /login first.\n请先登录');
+            return;
+        }
+        const asn = ctx.session.asn;
+        await ctx.answerCallbackQuery();
 
-    // Creation callbacks (peer:node, peer:select_session_type, peer:session:*, 
+        try {
+            const result = await apiRequest('/admin', 'POST', { action: 'enumRouters' }, config.apiToken);
+            const routers = (result.data?.routers ?? []) as Array<{
+                uuid: string; name: string; endpoint?: string; wgPublicKey?: string;
+                nodeId?: number; regionCode?: number; maxPeers?: number;
+                sessionCount?: number; isOpen?: boolean; allowCnPeers?: boolean;
+            }>;
+            const r = routers.find((x) => x.name === name);
+            if (!r) { await ctx.reply('❌ Node not found.'); return; }
+
+            const hasCapacity = !r.maxPeers || (r.sessionCount ?? 0) < r.maxPeers;
+            if (!r.isOpen || !hasCapacity) {
+                await ctx.reply(`❌ \`${name}\` is not open for peering right now.\n该节点当前不可 Peer。`, { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const endpoint = r.endpoint || `${r.name}.dn42.moenet.work`;
+            ctx.session.peerFlow = {
+                step: 'show_wg_info',
+                routerName: r.name,
+                sessionUuid: r.uuid,
+                serverEndpoint: endpoint,
+                serverPort: calculatePort(asn),
+                serverPubkey: r.wgPublicKey || 'N/A',
+                serverLla: `fe80::998:${r.regionCode || 0}:${r.nodeId || 0}:1`,
+                nodeMap: {
+                    [r.name]: {
+                        uuid: r.uuid,
+                        endpoint,
+                        pubkey: r.wgPublicKey || 'N/A',
+                        nodeId: r.nodeId || 0,
+                        regionCode: r.regionCode || 0,
+                        name: r.name,
+                        allowCnPeers: r.allowCnPeers,
+                    },
+                },
+            };
+            await showServerWgInfo(ctx);
+        } catch (error) {
+            console.error('[Peer here] Error:', error);
+            await ctx.reply('❌ Failed to start peering.\n启动 Peer 失败。');
+        }
+    });
+
+
+    // Creation callbacks (peer:node, peer:select_session_type, peer:session:*,
     // peer:ipv6, peer:endpoint:none, peer:mtu, peer:psk) are now in handlers/creation.ts
 
 
@@ -1456,9 +1515,39 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
                         const sessionUuid = result.data?.uuid || '';
 
+                        // Lenient auto-approve (mirrors the peer:confirm callback).
+                        let evaluation: Awaited<ReturnType<typeof evaluatePeerRequest>> | null = null;
+                        let autoApproved = false;
+                        if (!flow.isAdminMode && sessionUuid) {
+                            evaluation = await evaluatePeerRequest({
+                                asn: asn as number,
+                                routerName: flow.routerName,
+                                nodeAllowCn: flow.allowCnPeers,
+                                ipv6: flow.ipv6,
+                                localIpv6: flow.localIpv6,
+                                endpoint: flow.endpoint,
+                                port: flow.port,
+                                publicKey: flow.publicKey,
+                                contact: flow.contact,
+                                sessionType: flow.sessionType,
+                            });
+                            if (evaluation.autoApprove) {
+                                const appr = await apiRequest('/admin', 'POST', {
+                                    action: 'approveSession',
+                                    uuid: sessionUuid,
+                                }, config.apiToken);
+                                autoApproved = appr.code === 0;
+                                if (!autoApproved) {
+                                    console.error(`[AutoApprove] approveSession failed for AS${asn}: ${appr.message}`);
+                                }
+                            }
+                        }
+
                         const statusText = flow.isAdminMode
                             ? `✅ Status: ACTIVE (免审核)`
-                            : `⏳ Status: Pending Review\n等待管理员审核`;
+                            : autoApproved
+                                ? `✅ Status: Approved — provisioning now\n已自动通过审核，正在部署`
+                                : `⏳ Status: Pending Review\n等待管理员审核`;
 
                         const successText =
                             `🎉 *Peer Created Successfully!*\n成功创建 Peer!\n\n` +
@@ -1476,25 +1565,18 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                         await ctx.reply(successText, { parse_mode: 'Markdown' });
 
                         // Notify admin if not in admin mode (with retry for reliability)
-                        if (!flow.isAdminMode && config.adminChatId) {
-                            const adminNotification = await buildApprovalCard({
-                                asn: asn as number,
-                                routerName: flow.routerName,
-                                nodeAllowCn: flow.allowCnPeers,
-                                ipv6: flow.ipv6,
-                                localIpv6: flow.localIpv6,
-                                endpoint: flow.endpoint,
-                                port: flow.port,
-                                publicKey: flow.publicKey,
-                                contact: flow.contact,
-                                sessionType: flow.sessionType,
-                            });
+                        if (!flow.isAdminMode && config.adminChatId && evaluation) {
+                            const adminNotification =
+                                (autoApproved ? '🟢 *Auto-approved* (all hard checks passed)\n\n' : '') +
+                                evaluation.card;
 
-                            const keyboard = new InlineKeyboard()
-                                .text('✅ Approve', `approve:${sessionUuid}`)
-                                .text('❌ Reject', `reject:${sessionUuid}`)
-                                .row()
-                                .text('📋 All Pending', 'admin:pending');
+                            const keyboard = autoApproved
+                                ? new InlineKeyboard().text('📋 All Pending', 'admin:pending')
+                                : new InlineKeyboard()
+                                    .text('✅ Approve', `approve:${sessionUuid}`)
+                                    .text('❌ Reject', `reject:${sessionUuid}`)
+                                    .row()
+                                    .text('📋 All Pending', 'admin:pending');
 
                             let notified = false;
                             for (let attempt = 1; attempt <= 3; attempt++) {
