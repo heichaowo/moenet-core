@@ -126,6 +126,96 @@ async function showModifyMenu(ctx: BotContext, isFirstTime = false) {
 
 
 
+/** Status dot for a peering session status. */
+function peerDot(status: number): string {
+    if (status === PeeringStatus.ENABLED) return '🟢';
+    if (status === PeeringStatus.PENDING_REVIEW || status === PeeringStatus.QUEUED_FOR_SETUP) return '⏳';
+    if (status === PeeringStatus.PROBLEM) return '🔴';
+    return '⚪';
+}
+
+/** Render a user's peer list as an inline keyboard (unified /peer entry). */
+async function showPeerList(ctx: BotContext, asn: number, adminMode: boolean, editId?: number) {
+    const result = await apiRequest('/admin', 'POST', { action: 'enumSessions', asn }, config.apiToken);
+    if (result.code !== 0) { await ctx.reply(`❌ ${result.message}`); return; }
+    const sessions = (result.data?.sessions || []) as Array<{ uuid: string; router: string; routerName?: string; status: number }>;
+
+    let text = `🔗 *Peers — AS${asn}* (${sessions.length})\n\n`;
+    const kb = new InlineKeyboard();
+    if (sessions.length === 0) {
+        text += '_No peers yet. Tap ➕ to create one._\n还没有 Peer，点 ➕ 新建。';
+    } else {
+        for (const s of sessions) {
+            text += `${peerDot(s.status)} \`${s.routerName || s.router}\` — ${STATUS_LABELS[s.status] || s.status}\n`;
+            kb.text(`${peerDot(s.status)} ${s.routerName || s.router}`, `peer:v:${s.uuid}`).row();
+        }
+    }
+    if (!adminMode) kb.text('➕ New Peer', 'peer:new');
+    kb.text('🔄 Refresh', adminMode ? `peer:la:${asn}` : 'peer:list');
+
+    if (editId) {
+        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
+        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+}
+
+/** Render a single peer's detail card with action buttons (reuses modify/remove). */
+async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
+    const result = await apiRequest('/admin', 'POST', { action: 'getSession', uuid }, config.apiToken);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const s = result.data?.session as any;
+    if (result.code !== 0 || !s) { await ctx.reply('❌ Peer not found.\n找不到该 Peer。'); return; }
+    if (!isAdmin(ctx) && Number(s.asn) !== ctx.session.asn) {
+        const msg = '❌ This peer does not belong to you.\n这不是你的 Peer。';
+        if (editId) await ctx.api.editMessageText(ctx.chat!.id, editId, msg); else await ctx.reply(msg);
+        return;
+    }
+
+    let pubkey = '', hasPsk = false;
+    if (s.credential) {
+        try {
+            const c = typeof s.credential === 'string' ? JSON.parse(s.credential) : s.credential;
+            pubkey = c.pubkey || c.public_key || '';
+            hasPsk = !!(c.preshared_key || c.psk);
+        } catch { /* ignore */ }
+    }
+    const rawExt = s.extensions;
+    const extStr = Array.isArray(rawExt) ? rawExt.join(',') : (rawExt || '');
+    const channel = extStr.includes('mp_bgp') || extStr.includes('mpbgp') ? 'IPv6 & IPv4' : 'IPv6 only';
+    const routerLabel = s.routerName || s.router;
+
+    const text =
+        `🔗 *Peer on ${routerLabel}*\n` +
+        `────────\n` +
+        `🆔 ASN: \`AS${s.asn}\`\n` +
+        `${peerDot(s.status)} Status: ${STATUS_LABELS[s.status] || s.status}\n` +
+        `🔀 Channel: ${channel}\n` +
+        `🌐 Peer IPv6: \`${s.ipv6 || '—'}\`\n` +
+        `📡 Endpoint: \`${s.endpoint || '—'}\`\n` +
+        `🖥 Server: \`${s.serverEndpoint || '—'}\`\n` +
+        `📏 MTU: \`${s.mtu || 1420}\`  ·  🔐 PSK: ${hasPsk ? 'on' : 'off'}\n` +
+        `🔑 PubKey: \`${pubkey ? pubkey.slice(0, 20) + '…' : '—'}\`\n` +
+        `📇 Contact: \`${s.contact || '—'}\``;
+
+    const kb = new InlineKeyboard()
+        .text('✏️ Modify', `modify:peer:${uuid}`)
+        .text('🗑 Delete', `remove:select:${uuid}`)
+        .row()
+        .text('📊 Status', `peer:st:${uuid}`)
+        .text('🔄 Restart', `peer:rs:${uuid}`)
+        .row()
+        .text('🔙 Peers', 'peer:list');
+
+    if (editId) {
+        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
+        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+}
+
 export function registerPeerCommands(bot: Bot<BotContext>) {
 
     // Register handlers from extracted modules
@@ -137,7 +227,29 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
     /**
      * /peer - Start peer creation wizard
      */
+    // /peer — unified peer command. No arg: your peer list (inline). /peer <asn>:
+    // admin views another ASN. Creation moved to the ➕ New button (peer:new).
     bot.command('peer', async (ctx) => {
+        const args = ctx.match?.trim().split(/\s+/) || [];
+        let targetAsn = ctx.session.asn;
+        let adminMode = false;
+        if (args[0] && isAsnInput(args[0])) {
+            if (!isAdmin(ctx)) {
+                await ctx.reply('❌ Only admin can view other ASN peers\n只有管理员可查看其他 ASN 的 Peer');
+                return;
+            }
+            targetAsn = normalizeAsn(args[0]);
+            adminMode = true;
+        }
+        if (!targetAsn) {
+            await ctx.reply('❌ Please /login first.\n请先登录');
+            return;
+        }
+        await showPeerList(ctx, targetAsn, adminMode);
+    });
+
+    // Peer creation wizard (the old /peer body). Reached via the ➕ New button.
+    async function startPeerCreation(ctx: BotContext) {
         if (!ctx.session.asn) {
             await ctx.reply('❌ Please /login first.\n请先登录');
             return;
@@ -299,6 +411,46 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             console.error('[Peer] Error:', error);
             await ctx.reply('❌ Failed to fetch nodes.\n获取节点列表失败。');
         }
+    }
+
+    // ===== Unified /peer list + detail handlers =====
+    bot.callbackQuery('peer:list', async (ctx) => {
+        if (!ctx.session.asn) { await ctx.answerCallbackQuery('❌ /login first'); return; }
+        await ctx.answerCallbackQuery();
+        await showPeerList(ctx, ctx.session.asn, false, ctx.callbackQuery.message?.message_id);
+    });
+    bot.callbackQuery(/^peer:la:(\d+)$/, async (ctx) => {
+        if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
+        await ctx.answerCallbackQuery();
+        await showPeerList(ctx, Number(ctx.match[1]), true, ctx.callbackQuery.message?.message_id);
+    });
+    bot.callbackQuery(/^peer:v:(.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery();
+        await showPeerDetail(ctx, ctx.match[1]!, ctx.callbackQuery.message?.message_id);
+    });
+    bot.callbackQuery('peer:new', async (ctx) => {
+        await ctx.answerCallbackQuery();
+        await startPeerCreation(ctx);
+    });
+    // Status: reuse the live /info card for this peer's ASN.
+    bot.callbackQuery(/^peer:st:(.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery('Fetching status…');
+        const r = await apiRequest('/admin', 'POST', { action: 'getSession', uuid: ctx.match[1] }, config.apiToken);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const s = r.data?.session as any;
+        if (!s) { await ctx.reply('❌ Not found'); return; }
+        if (!isAdmin(ctx) && Number(s.asn) !== ctx.session.asn) { await ctx.reply('❌ Not your peer'); return; }
+        await fetchAndDisplayInfo(ctx, Number(s.asn), isAdmin(ctx));
+    });
+    // Restart: resolve the session then reuse executeRestart.
+    bot.callbackQuery(/^peer:rs:(.+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery('Restarting…');
+        const r = await apiRequest('/admin', 'POST', { action: 'getSession', uuid: ctx.match[1] }, config.apiToken);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const s = r.data?.session as any;
+        if (!s) { await ctx.reply('❌ Not found'); return; }
+        if (!isAdmin(ctx) && Number(s.asn) !== ctx.session.asn) { await ctx.reply('❌ Not your peer'); return; }
+        await executeRestart(ctx, Number(s.asn), s.routerName || s.router, ctx.match[1]!);
     });
 
     /**
