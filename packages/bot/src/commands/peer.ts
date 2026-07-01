@@ -1470,68 +1470,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 },
             };
 
-            // Build current info display
-            const channel = hasMpbgp ? 'IPv6 & IPv4' : 'IPv6 only';
-            const mpbgpText = hasMpbgp ? (hasEnh ? 'IPv6 (ENH)' : 'IPv6') : 'Not supported';
-            const endpointDisplay = resolvedHost
-                ? (resolvedPort ? `${resolvedHost}:${resolvedPort}` : resolvedHost)
-                : 'Not set';
-
-            const currentInfo =
-                `\`\`\`CurrentInfo\n` +
-                `Region:\n` +
-                `    ${session.routerName || session.router || 'Unknown'}\n` +
-                `Basic:\n` +
-                `    ASN:         ${session.asn}\n` +
-                `    Channel:     ${channel}\n` +
-                `    MP-BGP:      ${mpbgpText}\n` +
-                `    Peer IPv6:   ${session.ipv6 || 'Not set'}\n` +
-                `    Peer IPv4:   ${session.ipv4 || 'Not set'}\n` +
-                `    Local IPv6:  ${session.ipv6LinkLocal || 'Not set'}\n` +
-                `    Local IPv4:  ${session.localIpv4 || 'Not set'}\n` +
-                `Tunnel:\n` +
-                `    Endpoint:    ${endpointDisplay}\n` +
-                `    PublicKey:   ${pubkey ? pubkey.slice(0, 20) + '...' : 'Not set'}\n` +
-                `    PSK:         ${hasPsk ? 'Enabled' : 'Not enabled'}\n` +
-                `    MTU:         ${session.mtu || 1420}\n` +
-                `Contact:\n` +
-                `    ${session.contact || 'Not set'}\n` +
-                `\`\`\``;
-
-            // Delete old message and send new one with ReplyKeyboard
+            // Clear any leftover ReplyKeyboard from the old modify UI (it persists
+            // in clients that used it), then render the inline menu.
             await ctx.deleteMessage();
-
-            // Send ReplyKeyboard menu (dn42-bot style)
-            await ctx.reply(
-                `🔧 *Modify Peer*\n修改 Peer\n\n` +
-                `Current information is as follows\n当前信息如下\n\n` +
-                currentInfo + `\n\n` +
-                `Select the item to be modified:\n选择想要修改的内容:\n\n` +
-                `- \`Region\` - Migration to another node\n` +
-                `- \`Session Type\` - Change BGP session type\n` +
-                `- \`BGP Address\` - Change BGP addresses\n` +
-                `- \`Clearnet Endpoint\` - Change WireGuard endpoint\n` +
-                `- \`WireGuard PublicKey\` - Change public key\n` +
-                `- \`PSK\` - Enable/Disable Pre-Shared Key\n` +
-                `- \`MTU\` - Change tunnel MTU\n` +
-                `- \`Contact\` - Change contact info\n\n` +
-                `- \`Finish modification\` - Submit changes\n` +
-                `- \`Abort modification\` - Cancel all changes`,
-                {
-                    parse_mode: 'Markdown',
-                    reply_markup: {
-                        keyboard: [
-                            [{ text: 'Region' }, { text: 'Clearnet Endpoint' }],
-                            [{ text: 'Session Type' }, { text: 'WireGuard PublicKey' }],
-                            [{ text: 'BGP Address' }, { text: 'PSK' }],
-                            [{ text: 'MTU' }, { text: 'Contact' }],
-                            [{ text: 'Finish modification' }, { text: 'Abort modification' }],
-                        ],
-                        resize_keyboard: true,
-                        one_time_keyboard: false,
-                    }
-                }
-            );
+            await ctx.reply('🔄 Updating menu…\n更新菜单…', { reply_markup: { remove_keyboard: true } });
+            await showModifyMenu(ctx, true);
         } catch (error) {
             console.error('[Modify Peer] Error:', error);
             await ctx.editMessageText('❌ Failed to fetch session details');
