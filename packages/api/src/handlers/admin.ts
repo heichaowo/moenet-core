@@ -266,7 +266,7 @@ async function setRouter(
 				where: { uuid: router },
 			});
 		} else if (type === "add") {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			// biome-ignore lint/suspicious/noExplicitAny: dynamic Sequelize create attributes
 			await models.routers.create(routerData as any);
 		} else {
 			return makeResponse(
@@ -382,7 +382,7 @@ async function createRouter(
 				// Auto-generate loopback IPs via IP allocator
 				dn42Loopback4: computeLoopbackIPv4(nextNodeId),
 				dn42Loopback6: computeLoopbackIPv6(regionCode, nextNodeId),
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				// biome-ignore lint/suspicious/noExplicitAny: dynamic Sequelize create attributes
 			} as any);
 
 			return success(c, {
@@ -2206,13 +2206,12 @@ async function registerTelegramId(
 	try {
 		const [user, created] = await models.users.findOrCreate({
 			where: { asn: Number(asn) },
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			defaults: {
 				asn: Number(asn),
 				telegramId: Number(telegramId),
-				username: username || null,
 				isAdmin: false,
 				isBlocked: false,
+				// biome-ignore lint/suspicious/noExplicitAny: id is auto-increment
 			} as any,
 		});
 
