@@ -8,6 +8,7 @@ import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../serv
 import { DIVIDER } from '../templates';
 import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
 import { isAdmin } from '../guards';
+import { buildApprovalCard } from './peer/approvalCard';
 
 // Import from new peer module
 import {
@@ -1476,14 +1477,18 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
                         // Notify admin if not in admin mode (with retry for reliability)
                         if (!flow.isAdminMode && config.adminChatId) {
-                            const adminNotification =
-                                `🔔 *New Peer Request*\n新的 Peer 申请\n\n` +
-                                `🆔 ASN: \`AS${asn}\`\n` +
-                                `📍 Node: \`${flow.routerName}\`\n` +
-                                `🌐 IPv6: \`${flow.ipv6}\`\n` +
-                                `📡 Endpoint: ${flow.endpoint ? `\`${flow.endpoint}:${flow.port}\`` : 'NAT'}\n` +
-                                (flow.contact ? `📞 Contact: \`${flow.contact}\`\n` : '') +
-                                `\nUse /pending to review all`;
+                            const adminNotification = await buildApprovalCard({
+                                asn: asn as number,
+                                routerName: flow.routerName,
+                                nodeAllowCn: flow.allowCnPeers,
+                                ipv6: flow.ipv6,
+                                localIpv6: flow.localIpv6,
+                                endpoint: flow.endpoint,
+                                port: flow.port,
+                                publicKey: flow.publicKey,
+                                contact: flow.contact,
+                                sessionType: flow.sessionType,
+                            });
 
                             const keyboard = new InlineKeyboard()
                                 .text('✅ Approve', `approve:${sessionUuid}`)
