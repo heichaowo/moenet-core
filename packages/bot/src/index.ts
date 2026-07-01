@@ -375,10 +375,17 @@ function startMigrationNotifyChecker(bot: Bot<BotContext>) {
             const targets = ((targetsResult.data as any)?.targets || []) as Array<{ asn: number; telegramId: number }>;
             const targetMap = new Map(targets.map(t => [t.asn, t.telegramId]));
 
-            let sent = 0;
+            // Track a per-ASN outcome so the admin gets a full breakdown. This is
+            // the ONLY record: checkMigrationNotify deletes the queue entry the
+            // moment the session is ENABLED, so a skipped/failed notify is not
+            // retried — the admin must be told exactly who to reach manually.
+            const outcomes: Array<{ asn: number; status: 'sent' | 'no_channel' | 'failed'; error?: string }> = [];
             for (const item of ready) {
                 const telegramId = targetMap.get(item.asn);
-                if (!telegramId) continue;
+                if (!telegramId) {
+                    outcomes.push({ asn: item.asn, status: 'no_channel' });
+                    continue;
+                }
 
                 const endpointLine = item.serverEndpoint
                     ? `🖥️ New Endpoint 新地址: \`${item.serverEndpoint}\`\n`
@@ -400,24 +407,45 @@ function startMigrationNotifyChecker(bot: Bot<BotContext>) {
 
                 try {
                     await bot.api.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
-                    sent++;
+                    outcomes.push({ asn: item.asn, status: 'sent' });
                 } catch (e) {
+                    const error = e instanceof Error ? e.message : String(e);
                     console.error(`[MigrateNotify] Failed to notify AS${item.asn}:`, e);
+                    outcomes.push({ asn: item.asn, status: 'failed', error });
                 }
             }
 
-            if (sent > 0) {
-                console.log(`[MigrateNotify] Sent ${sent} migration notification(s)`);
+            const sentList = outcomes.filter(o => o.status === 'sent');
+            const noChannel = outcomes.filter(o => o.status === 'no_channel');
+            const failed = outcomes.filter(o => o.status === 'failed');
+            console.log(`[MigrateNotify] ${sentList.length} sent, ${noChannel.length} no-channel, ${failed.length} failed`);
 
-                // Notify admin about completed notifications
-                const adminChatId = ready[0]?.adminChatId || config.adminChatId;
-                if (adminChatId) {
-                    await bot.api.sendMessage(
-                        adminChatId,
-                        `✅ Migration notification sent to ${sent}/${ready.length} user(s).\n` +
-                        `迁移通知已发送给 ${sent}/${ready.length} 个用户。`
-                    );
+            // Always report to admin when there was anything to notify — even if
+            // everything failed (previously a total failure was silent).
+            const adminChatId = ready[0]?.adminChatId || config.adminChatId;
+            if (adminChatId && outcomes.length > 0) {
+                const asnList = (arr: typeof outcomes) => arr.map(o => `\`AS${o.asn}\``).join(' ');
+                let summary =
+                    `📬 *Migration Notifications 迁移通知结果*\n\n` +
+                    `✅ Sent 已发送: *${sentList.length}*  ·  ⚠️ No TG 未绑定: *${noChannel.length}*  ·  ❌ Failed 失败: *${failed.length}*\n`;
+
+                if (sentList.length) summary += `\n✅ ${asnList(sentList)}\n`;
+                if (noChannel.length) {
+                    summary += `\n⚠️ *No Telegram linked 未绑定 TG:*\n${asnList(noChannel)}\n`;
                 }
+                if (failed.length) {
+                    summary += `\n❌ *Failed 发送失败:*\n`;
+                    for (const o of failed) {
+                        // Wrap the raw error in backticks (neutralise its markdown).
+                        summary += `   • \`AS${o.asn}\`: \`${(o.error || 'unknown').replace(/`/g, "'")}\`\n`;
+                    }
+                }
+                if (noChannel.length || failed.length) {
+                    summary +=
+                        `\n⚠️ _These users were NOT notified and the queue entry is already consumed (no auto-retry). Reach them via /notify if needed._\n` +
+                        `_以上用户未收到通知，且通知已消费不会重试；如需请用 /notify 手动通知。_`;
+                }
+                await bot.api.sendMessage(adminChatId, summary, { parse_mode: 'Markdown' });
             }
         } catch (error) {
             // Silently ignore — just a background check
