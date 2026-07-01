@@ -7,9 +7,9 @@
  */
 
 import type { Context, Next } from "hono";
-import { getRedis } from "../db/redisContext";
 import { timingSafeCompare } from "../common/helpers";
 import config from "../config";
+import { getRedis } from "../db/redisContext";
 
 interface RateLimitConfig {
 	windowMs: number; // Window size in milliseconds
@@ -105,9 +105,7 @@ export function rateLimiter() {
 		// limiting them would 429 core traffic. External/public callers (user
 		// JWTs on /session, login on /auth, anonymous) still get limited.
 		const authHeader = c.req.header("Authorization");
-		const bearer = authHeader?.startsWith("Bearer ")
-			? authHeader.slice(7)
-			: "";
+		const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
 		if (
 			bearer &&
 			config.auth.agentApiKey &&

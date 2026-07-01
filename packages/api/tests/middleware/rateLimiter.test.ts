@@ -74,9 +74,9 @@ describe('Rate Limiter Middleware', () => {
         const { rateLimiter } = await import('../../src/middleware/rateLimiter');
         const app = new Hono();
         app.use('*', rateLimiter());
-        app.get('/agent/:router/sessions', (c) => c.json({ ok: true }));
+        app.get('/api/v1/agent/:router/sessions', (c) => c.json({ ok: true }));
 
-        const res = await app.request('/agent/hk-edge/sessions');
+        const res = await app.request('/api/v1/agent/hk-edge/sessions');
 
         expect(res.status).toBe(200);
         expect(res.headers.get('X-RateLimit-Limit')).toBe('300');
