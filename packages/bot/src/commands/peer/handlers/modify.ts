@@ -104,6 +104,28 @@ export function registerModifyHandlers(
     bot: Bot<BotContext>,
     showModifyMenu: ShowModifyMenuFn
 ) {
+    // Clear leftover ReplyKeyboards from the old (now-removed) ReplyKeyboard-based
+    // /modify. Those buttons persist in clients that used the old flow; tapping one
+    // now sends its label as plain text, which would fall into an unrelated step
+    // (e.g. the remove-confirm code check → "incorrect code"). Intercept the known
+    // modify-only labels, drop any stale flow, and remove the keyboard. These
+    // labels don't collide with the creation flow (which uses different ones).
+    const ORPHAN_MODIFY_KB = new Set([
+        'Region', 'Clearnet Endpoint', 'Session Type', 'WireGuard PublicKey',
+        'BGP Address', 'PSK', 'MTU', 'Contact', 'Finish modification', 'Abort modification',
+        'Peer IPv6 (对方)', 'Peer IPv4 (对方)', 'Local IPv6 (我方)', 'Local IPv4 (我方)',
+    ]);
+    bot.on('message:text', async (ctx, next) => {
+        if (!ORPHAN_MODIFY_KB.has(ctx.message.text.trim())) return next();
+        ctx.session.peerFlow = undefined;
+        ctx.session.modifyInput = undefined;
+        await ctx.reply(
+            '✅ Old keyboard cleared. /modify is now inline buttons — run /modify again.\n' +
+            '旧键盘已清除。/modify 现在是内联按钮，请重新 /modify。',
+            { reply_markup: { remove_keyboard: true } },
+        );
+    });
+
     /**
      * Handle info:status callback
      */
