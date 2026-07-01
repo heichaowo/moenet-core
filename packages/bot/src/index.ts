@@ -81,6 +81,11 @@ interface SessionData {
         name: string;
         field: 'location' | 'provider' | 'maxPeers';
     };
+    /** Awaiting a typed value for a /modify field (inline flow, immediate submit). */
+    modifyInput?: {
+        uuid: string;
+        field: 'endpoint' | 'pubkey' | 'contact' | 'peerIpv6' | 'peerIpv4' | 'localIpv6' | 'localIpv4';
+    };
     /** Announce flow: message + router UUID order for bitmask */
     announceFlow?: {
         message?: string;

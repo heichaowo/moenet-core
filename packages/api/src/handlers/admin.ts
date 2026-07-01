@@ -992,6 +992,25 @@ async function updateSessionAdmin(
 		updateData.credential = JSON.stringify(credObj);
 	}
 
+	// Special handling: the peer's WireGuard public key lives inside credential
+	// JSON as public_key (there is no top-level column), so merge it in the same
+	// way as psk. Read from updateData.credential if psk already touched it.
+	if ("publicKey" in updates || "pubkey" in updates) {
+		const pub = (updates.publicKey ?? updates.pubkey) as string;
+		const base = (updateData.credential as string) ??
+			(session.get("credential") as string | null);
+		let credObj: Record<string, unknown> = {};
+		if (base) {
+			try {
+				credObj = typeof base === "string" ? JSON.parse(base) : base;
+			} catch {
+				/* use empty */
+			}
+		}
+		credObj.public_key = pub;
+		updateData.credential = JSON.stringify(credObj);
+	}
+
 	if (Object.keys(updateData).length === 0) {
 		return makeResponse(
 			c,

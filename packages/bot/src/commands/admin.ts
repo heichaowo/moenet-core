@@ -454,23 +454,71 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			results: Array<{ asn: number; status: string; error?: string }>;
 		};
 
+		const migratedAsns = results
+			.filter((r) => r.status === "ok")
+			.map((r) => r.asn);
+
+		// Best-effort: fetch the target node's server details so the admin sees
+		// the new endpoint/key the migrated peers will reconnect to.
+		let targetInfo = "";
+		try {
+			const tr = await apiRequest(
+				"/admin",
+				"POST",
+				{ action: "getRouter", name: toName },
+				config.apiToken,
+			);
+			const router = (
+				tr.data as {
+					router?: {
+						wgPublicKey?: string;
+						publicIp?: string;
+						publicIpv6?: string;
+					};
+				}
+			)?.router;
+			if (router) {
+				const host =
+					router.publicIp ||
+					(router.publicIpv6
+						? `[${router.publicIpv6}]`
+						: `${toName}.dn42.moenet.work`);
+				targetInfo =
+					`\n📡 *Target node ${escapeMarkdown(toName)}:*\n` +
+					`   Host 主机: \`${host}\`\n` +
+					(router.wgPublicKey
+						? `   WG PubKey 公钥: \`${router.wgPublicKey}\`\n`
+						: "") +
+					`   _Listen port is per-ASN; each peer gets its exact config in the notification._\n`;
+			}
+		} catch (e) {
+			console.warn("[Migrate] failed to fetch target node details:", e);
+		}
+
 		let message =
 			`✅ *Migration Complete 迁移完成*\n\n` +
-			`From 源: \`${fromName}\`\n` +
-			`To 目标: \`${toName}\`\n\n` +
-			`✅ Migrated 已迁移: *${migrated}*\n`;
+			`📤 From 源: \`${fromName}\`  →  📥 To 目标: \`${toName}\`\n` +
+			`${DIVIDER}\n` +
+			`✅ Migrated 已迁移: *${migrated}*` +
+			(failed > 0 ? `   ❌ Failed 失败: *${failed}*` : "") +
+			`\n`;
+
+		if (migratedAsns.length > 0) {
+			message += migratedAsns.map((a) => `\`AS${a}\``).join("  ") + `\n`;
+		}
 
 		if (failed > 0) {
-			message += `❌ Failed 失败: *${failed}*\n\n`;
-			message += `*Failures:*\n`;
+			message += `\n*Failures 失败详情:*\n`;
 			for (const r of results.filter((r) => r.status === "error")) {
 				message += `• AS${r.asn}: ${escapeMarkdown(r.error || "unknown")}\n`;
 			}
 		}
 
+		message += targetInfo;
+
 		message +=
-			`\n⏳ Users will be notified automatically once new sessions are active.\n` +
-			`用户将在新会话激活后自动收到通知。`;
+			`\n⏳ Users auto-notified once new sessions are active.\n` +
+			`新会话激活后自动通知用户（已加入通知队列）。`;
 
 		await ctx.editMessageText(message, { parse_mode: "Markdown" });
 

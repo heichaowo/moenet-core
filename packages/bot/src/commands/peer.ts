@@ -32,7 +32,6 @@ import {
     parseMTU,
     parseEndpoint,
     // Helpers
-    BUTTONS,
     isBackButton,
     isAbortButton,
     isFinishButton,
@@ -98,34 +97,32 @@ async function showModifyMenu(ctx: BotContext, isFirstTime = false) {
     // Set step back to modify_menu
     ctx.session.peerFlow = { ...flow, step: 'modify_menu' };
 
+    // Fully inline menu. Each item edits immediately (see modify:m:* handlers in
+    // peer/handlers/modify.ts) — no batch Finish/Abort. "✅ Done" closes the flow.
+    const keyboard = new InlineKeyboard()
+        .text('📍 Region', 'modify:m:region')
+        .text('🔀 Session Type', 'modify:m:stype')
+        .row()
+        .text('🌐 BGP Address', 'modify:m:bgp')
+        .text('📡 Endpoint', 'modify:m:endpoint')
+        .row()
+        .text('🔑 PublicKey', 'modify:m:pubkey')
+        .text('🔐 PSK', 'modify:m:psk')
+        .row()
+        .text('📏 MTU', 'modify:m:mtu')
+        .text('📇 Contact', 'modify:m:contact')
+        .row()
+        .text('✅ Done 完成', 'modify:m:done');
+
     await ctx.reply(
         `🔧 *Modify Peer*\n修改 Peer\n\n` +
         `${headerText}\n\n` +
         currentInfo + `\n\n` +
-        `Select the item to be modified:\n选择想要修改的内容:\n\n` +
-        `- \`Region\` - Migration to another node\n` +
-        `- \`Session Type\` - Change BGP session type\n` +
-        `- \`BGP Address\` - Change BGP addresses\n` +
-        `- \`Clearnet Endpoint\` - Change WireGuard endpoint\n` +
-        `- \`WireGuard PublicKey\` - Change public key\n` +
-        `- \`PSK\` - Enable/Disable Pre-Shared Key\n` +
-        `- \`MTU\` - Change tunnel MTU\n` +
-        `- \`Contact\` - Change contact info\n\n` +
-        `- \`Finish modification\` - Submit changes\n` +
-        `- \`Abort modification\` - Cancel all changes`,
+        `Tap an item to edit — changes apply immediately.\n` +
+        `点击一项即可编辑，改动立即生效。`,
         {
             parse_mode: 'Markdown',
-            reply_markup: {
-                keyboard: [
-                    [{ text: 'Region' }, { text: 'Clearnet Endpoint' }],
-                    [{ text: 'Session Type' }, { text: 'WireGuard PublicKey' }],
-                    [{ text: 'BGP Address' }, { text: 'PSK' }],
-                    [{ text: 'MTU' }, { text: 'Contact' }],
-                    [{ text: BUTTONS.FINISH }, { text: BUTTONS.ABORT }],
-                ],
-                resize_keyboard: true,
-                one_time_keyboard: false,
-            }
+            reply_markup: keyboard,
         }
     );
 }
