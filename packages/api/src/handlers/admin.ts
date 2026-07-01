@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Context } from "hono";
 import { verify } from "hono/jwt";
 import { Op, UniqueConstraintError } from "sequelize";
@@ -112,6 +113,8 @@ export default async function adminHandler(c: Context): Promise<Response> {
 			return await getRouter(c, body);
 		case "updateRouter":
 			return await updateRouter(c, body);
+		case "regenerateBootstrapToken":
+			return await regenerateBootstrapToken(c, body);
 		case "deleteRouter":
 			return await deleteRouter(c, body);
 		case "enumSessions":
@@ -502,6 +505,48 @@ async function updateRouter(
 }
 
 /**
+ * Regenerate a router's bootstrap token.
+ *
+ * bootstrapToken is deliberately NOT in ROUTER_ADMIN_UPDATABLE (it's a security
+ * credential, not a free-form field), so it can't be set via updateRouter. This
+ * dedicated action generates a fresh token server-side and returns it, so the
+ * "refresh token" button has a working path. One-time-use is enforced elsewhere
+ * (bootstrap consumes and nulls it).
+ */
+async function regenerateBootstrapToken(
+	c: Context,
+	body: { name?: string; router?: string },
+): Promise<Response> {
+	const identifier = body.name || body.router;
+	if (!identifier) {
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"Missing name or router",
+		);
+	}
+
+	const models = getModels();
+	const isUuid =
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+			identifier,
+		);
+	const whereClause = isUuid ? { uuid: identifier } : { name: identifier };
+
+	const router = await models.routers.findOne({ where: whereClause });
+	if (!router) {
+		return makeResponse(c, ResponseCode.NOT_FOUND, undefined, "Router not found");
+	}
+
+	// 24 url-safe chars (fits the STRING(32) column).
+	const token = randomBytes(18).toString("base64url");
+	await router.update({ bootstrapToken: token });
+
+	return success(c, { token });
+}
+
+/**
  * Delete a router (supports both uuid and name)
  */
 async function deleteRouter(
@@ -528,11 +573,11 @@ async function deleteRouter(
 	const whereClause = isUuid ? { uuid: identifier } : { name: identifier };
 
 	try {
-		const deleted = await models.routers.destroy({
-			where: whereClause,
-		});
-
-		if (!deleted) {
+		// Resolve the router first so we can cascade to its sessions. There is no
+		// DB-level ON DELETE CASCADE, so deleting the router alone would leave its
+		// bgpSessions orphaned (dangling router UUID the agent never cleans up).
+		const router = await models.routers.findOne({ where: whereClause });
+		if (!router) {
 			return makeResponse(
 				c,
 				ResponseCode.NOT_FOUND,
@@ -540,6 +585,17 @@ async function deleteRouter(
 				"Router not found",
 			);
 		}
+		const routerUuid = router.get("uuid") as string;
+
+		const sessionsDeleted = await models.bgpSessions.destroy({
+			where: { router: routerUuid },
+		});
+		await router.destroy();
+
+		return success(c, {
+			message: "Router deleted",
+			sessionsDeleted,
+		});
 	} catch (error) {
 		console.error("[Admin] Error deleting router:", error);
 		return makeResponse(
@@ -549,8 +605,6 @@ async function deleteRouter(
 			"Failed to delete router",
 		);
 	}
-
-	return success(c, { message: "Router deleted" });
 }
 
 /**

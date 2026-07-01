@@ -956,66 +956,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		}
 	}
 
-	/**
-	 * /nodes - List all nodes
-	 */
-	bot.command("nodes", async (ctx) => {
-		if (!isAdmin(ctx)) {
-			await ctx.reply("❌ Admin access required.\n需要管理员权限。");
-			return;
-		}
-		try {
-			const result = await apiRequest(
-				"/admin",
-				"POST",
-				{
-					action: "enumRouters",
-				},
-				config.apiToken,
-			);
-
-			if (result.code !== 0) {
-				await ctx.reply(`❌ Error: ${result.message}`);
-				return;
-			}
-
-			const routers = result.data?.routers || [];
-
-			if (routers.length === 0) {
-				await ctx.reply("❌ No nodes found.\n没有找到节点。");
-				return;
-			}
-
-			let message = `📡 *MoeNet Nodes 节点列表 (${routers.length})*\n${DIVIDER}\n\n`;
-			routers.forEach((r: RouterInfo) => {
-				const status = r.isOpen ? "🟢" : "🔴";
-				const capacity = r.maxPeers
-					? `${r.sessionCount || 0}/${r.maxPeers}`
-					: `${r.sessionCount || 0}/∞`;
-				const ipv4 = r.supportsIpv4 ? "✓" : "✗";
-				const ipv6 = r.supportsIpv6 ? "✓" : "✗";
-
-				message += `${status} *${escapeMarkdown(r.name)}*`;
-				if (r.location) message += ` — ${escapeMarkdown(r.location)}`;
-				if (r.provider) message += ` | ${escapeMarkdown(r.provider)}`;
-				message += `\n`;
-				message += `┃ 👥 ${capacity} peers | IPv4:${ipv4} IPv6:${ipv6}`;
-				if (!r.allowCnPeers) message += ` | 🚫CN`;
-				message += `\n`;
-				if (r.endpoint) {
-					message += `┗ 🌐 \`${r.endpoint}\`\n`;
-				} else {
-					message += `┗ 🌐 —\n`;
-				}
-				message += `\n`;
-			});
-
-			await ctx.reply(message, { parse_mode: "Markdown" });
-		} catch (error) {
-			console.error("[Nodes] Error:", error);
-			await ctx.reply("❌ Failed to fetch nodes.\n获取节点信息失败。");
-		}
-	});
+	// /nodes and node management moved to the unified /node command (nodes.ts).
 
 	// =============================================================================
 	// /health — Real-time WG + BGP Health Diagnostics
