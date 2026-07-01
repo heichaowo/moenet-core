@@ -216,6 +216,47 @@ async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
     }
 }
 
+/** Admin peer-management panel (admins have no peers of their own). */
+async function showAdminPeerPanel(ctx: BotContext, editId?: number) {
+    const text =
+        `🛠 *Peer Admin 面板*\n\n` +
+        `Manage all peers across the network.\n管理全网 peer:`;
+    const kb = new InlineKeyboard()
+        .text('📋 All sessions 所有会话', 'peer:all').row()
+        .text('➕ Add peer 添加', 'peer:adminadd').row()
+        .text('⏳ Pending 待审核', 'admin:pending').row()
+        .text('🔍 By ASN 按 ASN 查', 'peer:byasn').row()
+        .text('❌ Close 关闭', 'peer:close');
+    if (editId) {
+        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
+        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+}
+
+/** List every session across the network as an inline list (admin). */
+async function showAllSessions(ctx: BotContext, editId?: number) {
+    const result = await apiRequest('/admin', 'POST', { action: 'enumSessions' }, config.apiToken);
+    const sessions = (result.data?.sessions || []) as Array<{ uuid: string; router: string; routerName?: string; status: number; asn: number }>;
+    sessions.sort((a, b) => a.asn - b.asn);
+
+    let text = `📋 *All Sessions 所有会话* (${sessions.length})\n\n`;
+    const kb = new InlineKeyboard();
+    const shown = sessions.slice(0, 90); // Telegram inline-button ceiling
+    for (const s of shown) {
+        kb.text(`${peerDot(s.status)} AS${s.asn} · ${s.routerName || s.router}`, `peer:v:${s.uuid}`).row();
+    }
+    if (sessions.length > shown.length) text += `_(showing first ${shown.length})_\n`;
+    kb.text('🔙 Panel 面板', 'peer:panel');
+    if (editId) {
+        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
+        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+}
+
 export function registerPeerCommands(bot: Bot<BotContext>) {
 
     // Register handlers from extracted modules
@@ -231,31 +272,37 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
     // admin views another ASN. Creation moved to the ➕ New button (peer:new).
     bot.command('peer', async (ctx) => {
         const args = ctx.match?.trim().split(/\s+/) || [];
-        let targetAsn = ctx.session.asn;
-        let adminMode = false;
+        // /peer <asn> — admin views a specific ASN's peers.
         if (args[0] && isAsnInput(args[0])) {
             if (!isAdmin(ctx)) {
                 await ctx.reply('❌ Only admin can view other ASN peers\n只有管理员可查看其他 ASN 的 Peer');
                 return;
             }
-            targetAsn = normalizeAsn(args[0]);
-            adminMode = true;
-        }
-        if (!targetAsn) {
-            await ctx.reply('❌ Please /login first.\n请先登录');
+            await showPeerList(ctx, normalizeAsn(args[0]), true);
             return;
         }
-        await showPeerList(ctx, targetAsn, adminMode);
-    });
-
-    // Peer creation wizard (the old /peer body). Reached via the ➕ New button.
-    async function startPeerCreation(ctx: BotContext) {
+        // No arg: admin gets the management panel (admins have no peers of their
+        // own); a normal user gets their own peer list.
+        if (isAdmin(ctx)) {
+            await showAdminPeerPanel(ctx);
+            return;
+        }
         if (!ctx.session.asn) {
             await ctx.reply('❌ Please /login first.\n请先登录');
             return;
         }
+        await showPeerList(ctx, ctx.session.asn, false);
+    });
 
-        const asn = ctx.session.asn;
+    // Peer creation wizard (the old /peer body). Reached via ➕ New (user, own
+    // ASN) or the admin panel's Add (opts.adminMode + targetAsn — any ASN/node).
+    async function startPeerCreation(ctx: BotContext, opts?: { adminMode?: boolean; targetAsn?: number }) {
+        const adminMode = opts?.adminMode ?? false;
+        const asn = adminMode ? (opts?.targetAsn ?? 0) : (ctx.session.asn ?? 0);
+        if (!asn) {
+            await ctx.reply('❌ Please /login first.\n请先登录');
+            return;
+        }
 
         // Show identity confirmation
         await ctx.reply(
@@ -372,6 +419,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     serverPubkey: nodeInfo.pubkey,
                     serverLla: `fe80::998:${nodeInfo.regionCode}:${nodeInfo.nodeId}:1`,
                     nodeMap,
+                    isAdminMode: adminMode,
+                    targetAsn: adminMode ? asn : undefined,
                 };
 
                 await ctx.reply(
@@ -389,6 +438,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 step: 'select_node',
                 nodeMap,
                 couldPeerLabels: couldPeer,
+                isAdminMode: adminMode,
+                targetAsn: adminMode ? asn : undefined,
             };
 
             // Send node list
@@ -425,6 +476,47 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         await ctx.answerCallbackQuery();
         await startPeerCreation(ctx);
     });
+
+    // ===== Admin peer panel =====
+    bot.callbackQuery('peer:panel', async (ctx) => {
+        if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
+        await ctx.answerCallbackQuery();
+        await showAdminPeerPanel(ctx, ctx.callbackQuery.message?.message_id);
+    });
+    bot.callbackQuery('peer:all', async (ctx) => {
+        if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
+        await ctx.answerCallbackQuery();
+        await showAllSessions(ctx, ctx.callbackQuery.message?.message_id);
+    });
+    bot.callbackQuery('peer:byasn', async (ctx) => {
+        if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
+        ctx.session.peerAsnPrompt = 'view';
+        await ctx.answerCallbackQuery();
+        await ctx.reply('🔍 Enter ASN to view (e.g. `998` / `AS4242420998`):\n输入要查看的 ASN:', { parse_mode: 'Markdown' });
+    });
+    bot.callbackQuery('peer:adminadd', async (ctx) => {
+        if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
+        ctx.session.peerAsnPrompt = 'add';
+        await ctx.answerCallbackQuery();
+        await ctx.reply('➕ Enter ASN to add a peer for (e.g. `4242420998`):\n输入要为其添加 Peer 的 ASN:', { parse_mode: 'Markdown' });
+    });
+    bot.callbackQuery('peer:close', async (ctx) => {
+        await ctx.answerCallbackQuery();
+        try { await ctx.deleteMessage(); } catch { /* already gone */ }
+    });
+    // Admin ASN-prompt input (view another ASN, or add a peer for one).
+    bot.on('message:text', async (ctx, next) => {
+        const mode = ctx.session.peerAsnPrompt;
+        if (!mode) return next();
+        ctx.session.peerAsnPrompt = undefined;
+        const text = ctx.message.text.trim();
+        if (text === '/cancel') { await ctx.reply('🚫 Cancelled.'); return; }
+        const asn = normalizeAsn(text);
+        if (Number.isNaN(asn)) { await ctx.reply('❌ Invalid ASN. 无效 ASN。'); return; }
+        if (mode === 'view') await showPeerList(ctx, asn, true);
+        else await startPeerCreation(ctx, { adminMode: true, targetAsn: asn });
+    });
+
     // Status: reuse the live /info card for this peer's ASN.
     bot.callbackQuery(/^peer:st:(.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery('Fetching status…');
@@ -456,7 +548,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         const label = flow.couldPeerLabels[Number(ctx.match[1])];
         const nodeInfo = label ? flow.nodeMap[label] : undefined;
         if (!label || !nodeInfo) { await ctx.answerCallbackQuery('❌ Invalid selection'); return; }
-        const asn = ctx.session.asn;
+        const asn = flow.isAdminMode ? flow.targetAsn : ctx.session.asn;
         if (!asn) { await ctx.answerCallbackQuery('❌ /login first'); return; }
         await ctx.answerCallbackQuery();
         ctx.session.peerFlow = {
@@ -468,6 +560,8 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             serverPubkey: nodeInfo.pubkey,
             serverLla: `fe80::998:${nodeInfo.regionCode}:${nodeInfo.nodeId}:1`,
             nodeMap: flow.nodeMap,
+            isAdminMode: flow.isAdminMode,
+            targetAsn: flow.targetAsn,
         };
         await ctx.editMessageText(`✅ Selected: \`${label}\``, { parse_mode: 'Markdown' });
         await showServerWgInfo(ctx);

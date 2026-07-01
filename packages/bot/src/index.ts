@@ -76,6 +76,8 @@ interface SessionData {
             contact: string;
         };
     };
+    /** Admin is being prompted for an ASN (view that ASN's peers, or add one). */
+    peerAsnPrompt?: 'view' | 'add';
     nodeWizard?: {
         step: 'name' | 'hostname' | 'ipv4' | 'ipv6' | 'role' | 'region' | 'location' | 'provider' | 'bandwidth' | 'max_peers' | 'allow_cn' | 'confirm';
         data: Record<string, unknown>;
@@ -204,8 +206,6 @@ async function setBotCommands(bot: Bot<BotContext>) {
     if (config.adminChatId) {
         await bot.api.setMyCommands([
             { command: 'pending', description: 'Pending reviews 待审核' },
-            { command: 'sessions', description: 'All sessions 所有会话' },
-            { command: 'addpeer', description: 'Admin add peer 管理加连接' },
             { command: 'migrate', description: 'Bulk migrate 批量迁移' },
             { command: 'announce', description: 'Broadcast message 全员公告' },
             { command: 'notify', description: 'Notify users 定向通知' },
