@@ -815,7 +815,7 @@ async function rejectSession(
  */
 async function deleteSessionAdmin(
 	c: Context,
-	body: { uuid?: string },
+	body: { uuid?: string; force?: boolean },
 ): Promise<Response> {
 	if (!body.uuid) {
 		return makeResponse(
@@ -828,8 +828,34 @@ async function deleteSessionAdmin(
 
 	const models = getModels();
 
-	// Only delete sessions that are not already queued for deletion
-	const [updated] = await models.bgpSessions.update(
+	const session = await models.bgpSessions.findOne({
+		where: { uuid: body.uuid },
+	});
+	if (!session) {
+		return makeResponse(c, ResponseCode.NOT_FOUND, undefined, "Session not found");
+	}
+
+	// The normal teardown just marks QUEUED_FOR_DELETE and waits for the node's
+	// agent to clean up WG/BIRD and report completion (which destroys the row).
+	// But if the node is OFFLINE it never processes that — the row would linger
+	// forever and the peer can't be deleted. In that case (or when forced) delete
+	// the row directly; if the node ever returns, its orphan cleanup removes any
+	// stale WG/BIRD config.
+	const routerUuid = session.get("router") as string;
+	const router = await models.routers.findOne({
+		where: { uuid: routerUuid },
+		attributes: ["lastSeen"],
+	});
+	const lastSeen = router?.get("lastSeen") as Date | string | null | undefined;
+	const online =
+		!!lastSeen && Date.now() - new Date(lastSeen).getTime() < 5 * 60 * 1000;
+
+	if (body.force || !online) {
+		await session.destroy();
+		return success(c, { message: "Session deleted", deleted: true });
+	}
+
+	await models.bgpSessions.update(
 		{ status: PeeringStatus.QUEUED_FOR_DELETE },
 		{
 			where: {
@@ -838,17 +864,7 @@ async function deleteSessionAdmin(
 			},
 		},
 	);
-
-	if (!updated) {
-		return makeResponse(
-			c,
-			ResponseCode.NOT_FOUND,
-			undefined,
-			"Session not found or already queued for deletion",
-		);
-	}
-
-	return success(c, { message: "Session queued for deletion" });
+	return success(c, { message: "Session queued for deletion", queued: true });
 }
 
 /**

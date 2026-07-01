@@ -35,6 +35,8 @@ interface SessionData {
         psk?: string | null;
         contact?: string;
         nodeMap?: Record<string, { uuid: string; endpoint: string; pubkey: string; nodeId: number; regionCode: number; name?: string; allowCnPeers?: boolean }>;
+        /** Ordered node labels for the inline node picker (peer:pick:<index>). */
+        couldPeerLabels?: string[];
         // For modify flow - diff tracking (dn42-bot style)
         asn?: number;
         // Per-node China IP restriction (from selected router)
