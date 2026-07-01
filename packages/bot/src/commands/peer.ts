@@ -384,29 +384,22 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            // Save nodeMap to session
+            // Save nodeMap + ordered labels for inline selection.
             ctx.session.peerFlow = {
                 step: 'select_node',
                 nodeMap,
+                couldPeerLabels: couldPeer,
             };
 
             // Send node list
             await ctx.reply(msgText, { parse_mode: 'Markdown' });
 
-            // Build ReplyKeyboard with one row per option (same as /addpeer)
-            const keyboard: { text: string }[][] = couldPeer.map(label => [{ text: label }]);
-
-            // Send selection prompt with ReplyKeyboard
-            await ctx.reply(
-                'Select node:\n选择节点:',
-                {
-                    reply_markup: {
-                        keyboard,
-                        resize_keyboard: true,
-                        one_time_keyboard: true,
-                    }
-                }
-            );
+            // Inline node picker — callback carries the index; labels stay in
+            // session (no ReplyKeyboard).
+            const keyboard = new InlineKeyboard();
+            couldPeer.forEach((label, i) => keyboard.text(label, `peer:pick:${i}`).row());
+            keyboard.text('🚫 Cancel 取消', 'peer:cancel');
+            await ctx.reply('Select node:\n选择节点:', { reply_markup: keyboard });
         } catch (error) {
             console.error('[Peer] Error:', error);
             await ctx.reply('❌ Failed to fetch nodes.\n获取节点列表失败。');
@@ -451,6 +444,33 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         if (!s) { await ctx.reply('❌ Not found'); return; }
         if (!isAdmin(ctx) && Number(s.asn) !== ctx.session.asn) { await ctx.reply('❌ Not your peer'); return; }
         await executeRestart(ctx, Number(s.asn), s.routerName || s.router, ctx.match[1]!);
+    });
+
+    // Inline node pick during creation (replaces the ReplyKeyboard select_node).
+    bot.callbackQuery(/^peer:pick:(\d+)$/, async (ctx) => {
+        const flow = ctx.session.peerFlow;
+        if (!flow || flow.step !== 'select_node' || !flow.nodeMap || !flow.couldPeerLabels) {
+            await ctx.answerCallbackQuery('❌ Expired — run /peer again');
+            return;
+        }
+        const label = flow.couldPeerLabels[Number(ctx.match[1])];
+        const nodeInfo = label ? flow.nodeMap[label] : undefined;
+        if (!label || !nodeInfo) { await ctx.answerCallbackQuery('❌ Invalid selection'); return; }
+        const asn = ctx.session.asn;
+        if (!asn) { await ctx.answerCallbackQuery('❌ /login first'); return; }
+        await ctx.answerCallbackQuery();
+        ctx.session.peerFlow = {
+            step: 'show_wg_info',
+            routerName: nodeInfo.name,
+            sessionUuid: nodeInfo.uuid,
+            serverEndpoint: nodeInfo.endpoint,
+            serverPort: calculatePort(asn),
+            serverPubkey: nodeInfo.pubkey,
+            serverLla: `fe80::998:${nodeInfo.regionCode}:${nodeInfo.nodeId}:1`,
+            nodeMap: flow.nodeMap,
+        };
+        await ctx.editMessageText(`✅ Selected: \`${label}\``, { parse_mode: 'Markdown' });
+        await showServerWgInfo(ctx);
     });
 
     /**
