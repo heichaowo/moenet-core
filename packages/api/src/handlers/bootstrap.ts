@@ -363,6 +363,13 @@ echo "  journalctl -u moenet-agent -f"
 echo ""
 `;
 
+	// One-time use: invalidate the bootstrap token now that the script (which
+	// embeds the global agent API key) has been served. A leaked bootstrap URL
+	// would otherwise keep handing out the key. Re-bootstrapping requires the
+	// admin to issue a fresh token.
+	await router.update({ bootstrapToken: null });
+	console.log(`[Bootstrap] Consumed bootstrap token for node ${name}`);
+
 	return c.text(script, 200, {
 		"Content-Type": "text/x-shellscript",
 	});

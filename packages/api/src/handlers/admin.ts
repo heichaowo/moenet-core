@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { verify } from "hono/jwt";
-import { Op } from "sequelize";
+import { Op, UniqueConstraintError } from "sequelize";
 import {
 	generateUUID,
 	getInterfaceName,
@@ -207,6 +207,34 @@ async function enumRouters(c: Context): Promise<Response> {
 /**
  * Add or update a router
  */
+// Fields an admin may set on an existing router. Excludes identity/security and
+// derived columns (uuid, nodeId, bootstrapToken, wg/mesh public keys, loopbacks,
+// callbackUrl) so a raw `updates` object can't overwrite them — e.g. repointing
+// callbackUrl at an internal service (SSRF via setMaintenance) or rotating a key.
+const ROUTER_ADMIN_UPDATABLE = new Set([
+	"name",
+	"location",
+	"publicIp",
+	"publicIpv6",
+	"provider",
+	"bandwidth",
+	"maxPeers",
+	"allowCnPeers",
+	"supportsIpv4",
+	"supportsIpv6",
+	"nodeType",
+]);
+
+function pickRouterUpdatableFields(
+	data: Record<string, unknown>,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key of Object.keys(data)) {
+		if (ROUTER_ADMIN_UPDATABLE.has(key)) out[key] = data[key];
+	}
+	return out;
+}
+
 async function setRouter(
 	c: Context,
 	body: { type: string; router?: string; data: unknown },
@@ -227,7 +255,7 @@ async function setRouter(
 
 	try {
 		if (type === "update" && router) {
-			await models.routers.update(routerData, {
+			await models.routers.update(pickRouterUpdatableFields(routerData), {
 				where: { uuid: router },
 			});
 		} else if (type === "add") {
@@ -307,66 +335,83 @@ async function createRouter(
 	};
 	const regionCode = regionCodeMap[body.region?.toUpperCase()] || 101;
 
-	// Continent-aware nodeId allocation (gap-filling within range)
-	const continent = getContinentFromRegionCode(regionCode);
-	const allRouters = await models.routers.findAll({ attributes: ["nodeId"] });
-	const existingIds = allRouters.map((r) => r.get("nodeId") as number);
-	const nextNodeId = getNextAvailableNodeId(continent, existingIds);
-
-	if (nextNodeId === null) {
-		return makeResponse(
-			c,
-			ResponseCode.VALIDATION_ERROR,
-			undefined,
-			`No available node IDs for continent ${continent}. Range is full.`,
-		);
-	}
-
 	// Map role to nodeType
 	const nodeType = body.role === "rr" ? "rr" : "client";
+	const continent = getContinentFromRegionCode(regionCode);
 
-	try {
-		const router = await models.routers.create({
-			name: body.name,
-			location: body.location,
-			publicIp: body.ipv4 || null,
-			publicIpv6: body.ipv6 || null,
-			nodeType,
-			provider: body.provider || null,
-			bandwidth: body.bandwidth || null,
-			maxPeers: body.maxPeers || 20,
-			allowCnPeers: body.allowCnPeers ?? true,
-			bootstrapToken: body.bootstrapToken || null,
-			nodeId: nextNodeId,
-			regionCode,
-			supportsIpv4: !!body.ipv4,
-			supportsIpv6: !!body.ipv6,
-			// Auto-generate loopback IPs via IP allocator
-			dn42Loopback4: computeLoopbackIPv4(nextNodeId),
-			dn42Loopback6: computeLoopbackIPv6(regionCode, nextNodeId),
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		} as any);
+	// Allocate a node ID and create the router, retrying on the unique(node_id)
+	// constraint: a concurrent createRouter may have taken the same gap between
+	// our read and our insert (read-then-insert race → previously duplicate IPs).
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const allRouters = await models.routers.findAll({ attributes: ["nodeId"] });
+		const existingIds = allRouters.map((r) => r.get("nodeId") as number);
+		const nextNodeId = getNextAvailableNodeId(continent, existingIds);
 
-		return success(c, {
-			message: "Router created",
-			router: {
-				uuid: router.get("uuid"),
-				nodeId: router.get("nodeId"),
-				name: router.get("name"),
-				regionCode: router.get("regionCode"),
-				loopback4: router.get("dn42Loopback4"),
-				loopback6: router.get("dn42Loopback6"),
-			},
-		});
-	} catch (error) {
-		console.error("[Admin] Error creating router:", error);
-		return makeResponse(
-			c,
-			ResponseCode.INTERNAL_ERROR,
-			undefined,
-			"Failed to create router",
-		);
+		if (nextNodeId === null) {
+			return makeResponse(
+				c,
+				ResponseCode.VALIDATION_ERROR,
+				undefined,
+				`No available node IDs for continent ${continent}. Range is full.`,
+			);
+		}
+
+		try {
+			const router = await models.routers.create({
+				name: body.name,
+				location: body.location,
+				publicIp: body.ipv4 || null,
+				publicIpv6: body.ipv6 || null,
+				nodeType,
+				provider: body.provider || null,
+				bandwidth: body.bandwidth || null,
+				maxPeers: body.maxPeers || 20,
+				allowCnPeers: body.allowCnPeers ?? true,
+				bootstrapToken: body.bootstrapToken || null,
+				nodeId: nextNodeId,
+				regionCode,
+				supportsIpv4: !!body.ipv4,
+				supportsIpv6: !!body.ipv6,
+				// Auto-generate loopback IPs via IP allocator
+				dn42Loopback4: computeLoopbackIPv4(nextNodeId),
+				dn42Loopback6: computeLoopbackIPv6(regionCode, nextNodeId),
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			} as any);
+
+			return success(c, {
+				message: "Router created",
+				router: {
+					uuid: router.get("uuid"),
+					nodeId: router.get("nodeId"),
+					name: router.get("name"),
+					regionCode: router.get("regionCode"),
+					loopback4: router.get("dn42Loopback4"),
+					loopback6: router.get("dn42Loopback6"),
+				},
+			});
+		} catch (error) {
+			if (error instanceof UniqueConstraintError) {
+				console.warn(
+					`[Admin] node_id ${nextNodeId} taken concurrently, retrying (${attempt + 1}/5)`,
+				);
+				continue;
+			}
+			console.error("[Admin] Error creating router:", error);
+			return makeResponse(
+				c,
+				ResponseCode.INTERNAL_ERROR,
+				undefined,
+				"Failed to create router",
+			);
+		}
 	}
+
+	return makeResponse(
+		c,
+		ResponseCode.INTERNAL_ERROR,
+		undefined,
+		"Failed to allocate a unique node ID after retries",
+	);
 }
 
 /**
@@ -420,8 +465,18 @@ async function updateRouter(
 
 	const models = getModels();
 
+	const updates = pickRouterUpdatableFields(body.updates);
+	if (Object.keys(updates).length === 0) {
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"No updatable fields provided",
+		);
+	}
+
 	try {
-		const [updated] = await models.routers.update(body.updates, {
+		const [updated] = await models.routers.update(updates, {
 			where: { name: body.name },
 		});
 

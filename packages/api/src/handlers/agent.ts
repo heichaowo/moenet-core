@@ -16,6 +16,7 @@ import {
 	deriveLLAFromLoopback,
 	getContinentFromRegionCode,
 } from "../services/ipAllocator";
+import { canTransition } from "../services/workflowEngine";
 
 /**
  * Map regionCode to continent and subregion LC constants
@@ -371,9 +372,30 @@ async function handleModify(c: Context, router: string): Promise<Response> {
 		return success(c, { deleted: true });
 	}
 
+	// Validate the state transition — the agent should only drive valid status
+	// changes. A compromised or buggy agent must not force e.g. REJECTED→ENABLED.
+	// Same-status reports (e.g. re-reporting ENABLED after an agent restart) are
+	// allowed as no-ops.
+	const existing = await models.bgpSessions.findOne({
+		where: { uuid, router },
+		attributes: ["status"],
+	});
+	if (!existing) {
+		return makeResponse(c, ResponseCode.NOT_FOUND, undefined, "Session not found");
+	}
+	const currentStatus = existing.get("status") as PeeringStatus;
+	const newStatus = status as PeeringStatus;
+	if (currentStatus !== newStatus && !canTransition(currentStatus, newStatus)) {
+		console.warn(
+			`[handleModify] Rejected invalid transition for ${uuid} from agent ${router}: ${PeeringStatus[currentStatus]} → ${PeeringStatus[newStatus]}`,
+		);
+		// Ack without applying so the agent doesn't retry-storm on a rejected change.
+		return success(c, { updated: false, reason: "invalid transition" });
+	}
+
 	const [updated] = await models.bgpSessions.update(
 		{
-			status: status as PeeringStatus,
+			status: newStatus,
 			lastError: lastError || null,
 		},
 		{ where: { uuid, router } },

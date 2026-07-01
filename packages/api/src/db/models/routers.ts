@@ -75,6 +75,11 @@ export function initRoutersModel(sequelize: Sequelize): RoutersModel {
 				field: "node_id",
 				type: DataTypes.INTEGER,
 				allowNull: true,
+				// Unique: node_id derives the loopback IPs, so two routers with the
+				// same node_id would collide. The allocation in createRouter has a
+				// read-then-insert race; this constraint makes the second insert fail
+				// (caught + retried) instead of silently producing duplicate IPs.
+				unique: true,
 			},
 			provider: {
 				field: "provider",
