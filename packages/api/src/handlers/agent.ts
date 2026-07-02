@@ -1028,7 +1028,10 @@ async function handleBirdConfig(
 			bandwidthCommunity: getBandwidthCommunity(bandwidth),
 		},
 		policy: {
-			dn42As: policyData.dn42As,
+			// dn42As is a BIGINT column (number in JS), but the agent's BirdPolicy
+			// struct declares dn42As as a string (it's only interpolated into BIRD
+			// templates). Send it as a string so JSON decoding on the agent succeeds.
+			dn42As: String(policyData.dn42As),
 			dn42Ipv4Prefix: policyData.dn42Ipv4Prefix,
 			dn42Ipv6Prefix: policyData.dn42Ipv6Prefix,
 			rpkiServers: policyData.rpkiServers,
