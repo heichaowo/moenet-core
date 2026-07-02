@@ -93,12 +93,9 @@ See `.env.example` for all options.
 | `/start` | Show welcome message |
 | `/help` | List all commands |
 | `/login` | Authenticate with DN42 ASN (GPG / SSH / Email) |
-| `/peer` | Create new peering session |
-| `/info` | View your active peers |
-| `/modify` | Change peer settings |
-| `/remove` | Delete a peer |
-| `/status` | Check tunnel status |
-| `/restart` | Restart WireGuard tunnel |
+| `/peer` | Peer hub — inline list of your peers → detail card (✏️ Modify · 🗑 Delete · 📊 Status · 🔄 Restart) + ➕ New Peer |
+| `/node` | Browse nodes (inline list → details) |
+| `/info` `/modify` `/remove` `/status` `/restart` | Per-peer commands (also available as buttons on the `/peer` detail card) |
 
 ### Network Tools
 
@@ -114,10 +111,13 @@ See `.env.example` for all options.
 
 | Command | Description |
 |---------|-------------|
-| `/addnode` | Add new node (wizard) |
-| `/bootstrap <node>` | Generate setup script |
-| `/pending` | View pending approvals |
-| `/nodes` | List all nodes |
+| `/node` | Node management — add / edit / delete / bootstrap / maintenance (replaces `/addnode` `/delnode` `/bootstrap` `/nodes`) |
+| `/peer` | Admin panel — all sessions / add peer (any ASN+node) / pending / by ASN |
+| `/pending` | Review pending peer requests (approve / reject with optional reason) |
+| `/sessions` | All BGP sessions |
+| `/block <ASN>` · `/announce` · `/notify` | Block ASN · broadcast · targeted message |
+
+> Peer requests default to manual review; set `PEER_AUTO_APPROVE=true` for lenient auto-approve.
 
 ## API Reference
 
