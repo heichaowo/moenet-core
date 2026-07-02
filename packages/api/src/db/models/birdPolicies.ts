@@ -74,7 +74,10 @@ export function initBirdPoliciesModel(sequelize: Sequelize): BirdPoliciesModel {
 			},
 			dn42As: {
 				field: "dn42_as",
-				type: DataTypes.INTEGER.UNSIGNED,
+				// BIGINT: DN42 ASNs (4242420998) exceed PG's signed 32-bit INTEGER
+				// max, so a fresh DB + the default-policy seed would fail to insert.
+				// Returned as a number via the pg BIGINT type parser in dbContext.
+				type: DataTypes.BIGINT,
 				allowNull: false,
 				defaultValue: 4242420998,
 			},
@@ -94,7 +97,13 @@ export function initBirdPoliciesModel(sequelize: Sequelize): BirdPoliciesModel {
 				field: "rpki_servers",
 				type: DataTypes.JSON,
 				allowNull: false,
-				defaultValue: [{ name: "default", host: "rpki.akae.re", port: 8082 }],
+				// Two standard DN42 RPKI sources for redundancy (matches what the
+				// agent historically hardcoded). Used when a default policy row is
+				// auto-seeded; existing rows are left untouched.
+				defaultValue: [
+					{ name: "akae", host: "rpki.akae.re", port: 8082 },
+					{ name: "launchpadx", host: "rpki.dn42.launchpadx.top", port: 8082 },
+				],
 			},
 			ebgpImportLimit: {
 				field: "ebgp_import_limit",

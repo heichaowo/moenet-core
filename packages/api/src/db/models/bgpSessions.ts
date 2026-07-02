@@ -49,6 +49,7 @@ export interface BgpSessionAttributes {
 	data: string | null;
 	contact: string | null;
 	lastError: string | null;
+	observedEndpoint: string | null;
 	createdAt?: Date;
 	updatedAt?: Date;
 }
@@ -69,11 +70,17 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 				allowNull: false,
 			},
 			asn: {
-				type: DataTypes.INTEGER.UNSIGNED,
+				// BIGINT, not INTEGER: DN42 ASNs (e.g. 4242420998) exceed PG's
+				// signed 32-bit INTEGER max (~2.1e9). A fresh DB with INTEGER would
+				// fail to store them (bug-list #2). Returned as a number via the
+				// pg BIGINT type parser in dbContext.
+				type: DataTypes.BIGINT,
 				allowNull: false,
 			},
 			status: {
-				type: DataTypes.TINYINT.UNSIGNED,
+				// SMALLINT, not TINYINT: Postgres has no TINYINT, so a fresh
+				// sync({alter:true}) would fail with `type "tinyint" does not exist`.
+				type: DataTypes.SMALLINT.UNSIGNED,
 				allowNull: false,
 				defaultValue: PeeringStatus.PENDING_REVIEW,
 			},
@@ -83,7 +90,8 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 				defaultValue: 1420,
 			},
 			policy: {
-				type: DataTypes.TINYINT.UNSIGNED,
+				// SMALLINT, not TINYINT (Postgres has no TINYINT) — see status above.
+				type: DataTypes.SMALLINT.UNSIGNED,
 				allowNull: false,
 				defaultValue: SessionPolicy.FULL,
 			},
@@ -136,6 +144,11 @@ export function initBgpSessionsModel(sequelize: Sequelize): BgpSessionsModel {
 			},
 			lastError: {
 				field: "last_error",
+				type: DataTypes.STRING,
+				allowNull: true,
+			},
+			observedEndpoint: {
+				field: "observed_endpoint",
 				type: DataTypes.STRING,
 				allowNull: true,
 			},

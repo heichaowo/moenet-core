@@ -10,7 +10,7 @@
  *   002_add_some_column.sql
  */
 
-import { readdir, readFile, unlink } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Sequelize } from "sequelize";
 import type { SettingsModel } from "./models/settings";
@@ -34,10 +34,6 @@ export async function runMigrations(
 	settingsModel: SettingsModel,
 	migrationsDir: string,
 ): Promise<void> {
-	// Read executed migrations from settings
-	const executed = await getExecutedMigrations(settingsModel);
-	const executedSet = new Set(executed.map((m) => m.name));
-
 	// Discover migration files
 	let files: string[];
 	try {
@@ -48,60 +44,65 @@ export async function runMigrations(
 		console.log("[Migrations] No migrations directory found, skipping");
 		return;
 	}
+	if (files.length === 0) return;
 
-	// Find pending migrations
-	const pending = files.filter((f) => !executedSet.has(f));
-	if (pending.length === 0) {
-		console.log(`[Migrations] All ${files.length} migrations already applied`);
-		return;
-	}
+	// Serialize concurrent startups (multiple pods / restart races) with a
+	// Postgres session advisory lock — otherwise two processes can run the same
+	// DDL in parallel and corrupt the schema. The lock is released in `finally`.
+	await sequelize.query("SELECT pg_advisory_lock(4242420998)");
+	try {
+		// Re-read executed list AFTER acquiring the lock, in case another process
+		// applied migrations while we were waiting.
+		const executed = await getExecutedMigrations(settingsModel);
+		const executedSet = new Set(executed.map((m) => m.name));
 
-	console.log(`[Migrations] ${pending.length} pending migration(s) to run`);
-
-	// Execute each pending migration
-	for (const file of pending) {
-		const filePath = join(migrationsDir, file);
-		const sql = await readFile(filePath, "utf-8");
-
-		console.log(`[Migrations] Running: ${file}`);
-		try {
-			// Execute the raw SQL (skip empty/comment-only files)
-			const statements = sql
-				.split(";")
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0 && !s.startsWith("--"));
-
-			for (const stmt of statements) {
-				// Skip transaction control — Sequelize handles this
-				if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(stmt)) continue;
-				await sequelize.query(stmt);
-			}
-
-			// Record as executed
-			executed.push({
-				name: file,
-				executedAt: new Date().toISOString(),
-			});
-			await saveExecutedMigrations(settingsModel, executed);
-
-			console.log(`[Migrations] ✅ ${file} applied successfully`);
-
-			// Clean up — delete the migration file to avoid clutter
-			try {
-				await unlink(filePath);
-				console.log(`[Migrations] 🗑️ ${file} removed`);
-			} catch {
-				console.warn(`[Migrations] ⚠️ Could not delete ${file} (non-fatal)`);
-			}
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			console.error(`[Migrations] ❌ ${file} failed: ${msg}`);
-			// Stop on first failure — don't run subsequent migrations
-			throw new Error(`Migration ${file} failed: ${msg}`);
+		const pending = files.filter((f) => !executedSet.has(f));
+		if (pending.length === 0) {
+			console.log(
+				`[Migrations] All ${files.length} migrations already applied`,
+			);
+			return;
 		}
-	}
 
-	console.log(`[Migrations] All migrations applied successfully`);
+		console.log(`[Migrations] ${pending.length} pending migration(s) to run`);
+
+		// NOTE: migrations MUST be idempotent (use IF [NOT] EXISTS, guarded
+		// UPDATEs). We run the SQL then record it; a crash in between re-runs the
+		// file, so non-idempotent migrations could double-apply.
+		for (const file of pending) {
+			const filePath = join(migrationsDir, file);
+			const sql = await readFile(filePath, "utf-8");
+
+			console.log(`[Migrations] Running: ${file}`);
+			try {
+				// Run the whole file as a single query — splitting on ';' breaks
+				// dollar-quoted blocks (DO $$ ... END $$;). pg's simple query
+				// protocol (no bind params) executes all statements in the file.
+				const hasSql = sql
+					.split("\n")
+					.some(
+						(line) => line.trim().length > 0 && !line.trim().startsWith("--"),
+					);
+				if (hasSql) {
+					await sequelize.query(sql);
+				}
+
+				executed.push({ name: file, executedAt: new Date().toISOString() });
+				await saveExecutedMigrations(settingsModel, executed);
+				console.log(`[Migrations] ✅ ${file} applied successfully`);
+				// Files are NOT deleted: keep them so the schema is replayable if
+				// the migration-tracking row is ever lost/restored.
+			} catch (error) {
+				const msg = error instanceof Error ? error.message : String(error);
+				console.error(`[Migrations] ❌ ${file} failed: ${msg}`);
+				throw new Error(`Migration ${file} failed: ${msg}`);
+			}
+		}
+
+		console.log(`[Migrations] All migrations applied successfully`);
+	} finally {
+		await sequelize.query("SELECT pg_advisory_unlock(4242420998)");
+	}
 }
 
 /**

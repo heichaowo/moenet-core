@@ -7,6 +7,8 @@
  */
 
 import type { Context, Next } from "hono";
+import { timingSafeCompare } from "../common/helpers";
+import config from "../config";
 import { getRedis } from "../db/redisContext";
 
 interface RateLimitConfig {
@@ -15,19 +17,22 @@ interface RateLimitConfig {
 	keyPrefix: string; // Redis key prefix
 }
 
-// Route-specific configurations
+// Route-specific configurations.
+// NOTE: keys must match the real mounted paths, which are prefixed with
+// /api/v1 (see routes.ts). The old "/agent" etc. never matched
+// `path.startsWith(...)`, so every route silently fell back to `default`.
 const ROUTE_LIMITS: Record<string, RateLimitConfig> = {
-	"/agent": {
+	"/api/v1/agent": {
 		windowMs: 60 * 1000,
 		maxRequests: 300,
 		keyPrefix: "rl:agent",
 	},
-	"/auth": {
+	"/api/v1/auth": {
 		windowMs: 60 * 1000,
 		maxRequests: 60,
 		keyPrefix: "rl:auth",
 	},
-	"/admin": {
+	"/api/v1/admin": {
 		windowMs: 60 * 1000,
 		maxRequests: 30,
 		keyPrefix: "rl:admin",
@@ -94,11 +99,26 @@ export function rateLimiter() {
 			return next();
 		}
 
-		const config = getConfigForRoute(path);
+		// Exempt trusted internal clients: the bot and all agents authenticate
+		// with the agent API key. They legitimately make high-frequency calls
+		// (heartbeats every few seconds, admin queries per command), so rate
+		// limiting them would 429 core traffic. External/public callers (user
+		// JWTs on /session, login on /auth, anonymous) still get limited.
+		const authHeader = c.req.header("Authorization");
+		const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
+		if (
+			bearer &&
+			config.auth.agentApiKey &&
+			timingSafeCompare(bearer, config.auth.agentApiKey)
+		) {
+			return next();
+		}
+
+		const routeConfig = getConfigForRoute(path);
 		const clientKey = getClientKey(c);
-		const redisKey = `${config.keyPrefix}:${clientKey}`;
+		const redisKey = `${routeConfig.keyPrefix}:${clientKey}`;
 		const now = Date.now();
-		const windowStart = now - config.windowMs;
+		const windowStart = now - routeConfig.windowMs;
 
 		try {
 			const redis = getRedis();
@@ -116,7 +136,7 @@ export function rateLimiter() {
 			pipeline.zadd(redisKey, now, `${now}-${Math.random()}`);
 
 			// Set TTL to window size
-			pipeline.pexpire(redisKey, config.windowMs);
+			pipeline.pexpire(redisKey, routeConfig.windowMs);
 
 			const results = await pipeline.exec();
 
@@ -124,24 +144,24 @@ export function rateLimiter() {
 			const currentCount = (results?.[1]?.[1] as number) || 0;
 
 			// Set rate limit headers
-			c.header("X-RateLimit-Limit", String(config.maxRequests));
+			c.header("X-RateLimit-Limit", String(routeConfig.maxRequests));
 			c.header(
 				"X-RateLimit-Remaining",
-				String(Math.max(0, config.maxRequests - currentCount - 1)),
+				String(Math.max(0, routeConfig.maxRequests - currentCount - 1)),
 			);
 			c.header(
 				"X-RateLimit-Reset",
-				String(Math.ceil((now + config.windowMs) / 1000)),
+				String(Math.ceil((now + routeConfig.windowMs) / 1000)),
 			);
 
 			// Check if limit exceeded
-			if (currentCount >= config.maxRequests) {
-				c.header("Retry-After", String(Math.ceil(config.windowMs / 1000)));
+			if (currentCount >= routeConfig.maxRequests) {
+				c.header("Retry-After", String(Math.ceil(routeConfig.windowMs / 1000)));
 				return c.json(
 					{
 						code: 429,
 						message: "Too Many Requests",
-						retryAfter: Math.ceil(config.windowMs / 1000),
+						retryAfter: Math.ceil(routeConfig.windowMs / 1000),
 					},
 					429,
 				);

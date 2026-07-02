@@ -1,6 +1,7 @@
+import { randomBytes } from "node:crypto";
 import type { Context } from "hono";
 import { verify } from "hono/jwt";
-import { Op } from "sequelize";
+import { Op, UniqueConstraintError } from "sequelize";
 import {
 	generateUUID,
 	getInterfaceName,
@@ -112,6 +113,8 @@ export default async function adminHandler(c: Context): Promise<Response> {
 			return await getRouter(c, body);
 		case "updateRouter":
 			return await updateRouter(c, body);
+		case "regenerateBootstrapToken":
+			return await regenerateBootstrapToken(c, body);
 		case "deleteRouter":
 			return await deleteRouter(c, body);
 		case "enumSessions":
@@ -164,6 +167,10 @@ export default async function adminHandler(c: Context): Promise<Response> {
 			return await storeMigrationNotify(c, body);
 		case "checkMigrationNotify":
 			return await checkMigrationNotify(c, body);
+		case "ackMigrationNotify":
+			return await ackMigrationNotify(c, body);
+		case "sendMigrationEmail":
+			return await sendMigrationEmail(c, body);
 		default:
 			return makeResponse(
 				c,
@@ -207,6 +214,34 @@ async function enumRouters(c: Context): Promise<Response> {
 /**
  * Add or update a router
  */
+// Fields an admin may set on an existing router. Excludes identity/security and
+// derived columns (uuid, nodeId, bootstrapToken, wg/mesh public keys, loopbacks,
+// callbackUrl) so a raw `updates` object can't overwrite them — e.g. repointing
+// callbackUrl at an internal service (SSRF via setMaintenance) or rotating a key.
+const ROUTER_ADMIN_UPDATABLE = new Set([
+	"name",
+	"location",
+	"publicIp",
+	"publicIpv6",
+	"provider",
+	"bandwidth",
+	"maxPeers",
+	"allowCnPeers",
+	"supportsIpv4",
+	"supportsIpv6",
+	"nodeType",
+]);
+
+function pickRouterUpdatableFields(
+	data: Record<string, unknown>,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key of Object.keys(data)) {
+		if (ROUTER_ADMIN_UPDATABLE.has(key)) out[key] = data[key];
+	}
+	return out;
+}
+
 async function setRouter(
 	c: Context,
 	body: { type: string; router?: string; data: unknown },
@@ -227,11 +262,11 @@ async function setRouter(
 
 	try {
 		if (type === "update" && router) {
-			await models.routers.update(routerData, {
+			await models.routers.update(pickRouterUpdatableFields(routerData), {
 				where: { uuid: router },
 			});
 		} else if (type === "add") {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			// biome-ignore lint/suspicious/noExplicitAny: dynamic Sequelize create attributes
 			await models.routers.create(routerData as any);
 		} else {
 			return makeResponse(
@@ -307,66 +342,83 @@ async function createRouter(
 	};
 	const regionCode = regionCodeMap[body.region?.toUpperCase()] || 101;
 
-	// Continent-aware nodeId allocation (gap-filling within range)
-	const continent = getContinentFromRegionCode(regionCode);
-	const allRouters = await models.routers.findAll({ attributes: ["nodeId"] });
-	const existingIds = allRouters.map((r) => r.get("nodeId") as number);
-	const nextNodeId = getNextAvailableNodeId(continent, existingIds);
-
-	if (nextNodeId === null) {
-		return makeResponse(
-			c,
-			ResponseCode.VALIDATION_ERROR,
-			undefined,
-			`No available node IDs for continent ${continent}. Range is full.`,
-		);
-	}
-
 	// Map role to nodeType
 	const nodeType = body.role === "rr" ? "rr" : "client";
+	const continent = getContinentFromRegionCode(regionCode);
 
-	try {
-		const router = await models.routers.create({
-			name: body.name,
-			location: body.location,
-			publicIp: body.ipv4 || null,
-			publicIpv6: body.ipv6 || null,
-			nodeType,
-			provider: body.provider || null,
-			bandwidth: body.bandwidth || null,
-			maxPeers: body.maxPeers || 20,
-			allowCnPeers: body.allowCnPeers ?? true,
-			bootstrapToken: body.bootstrapToken || null,
-			nodeId: nextNodeId,
-			regionCode,
-			supportsIpv4: !!body.ipv4,
-			supportsIpv6: !!body.ipv6,
-			// Auto-generate loopback IPs via IP allocator
-			dn42Loopback4: computeLoopbackIPv4(nextNodeId),
-			dn42Loopback6: computeLoopbackIPv6(regionCode, nextNodeId),
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		} as any);
+	// Allocate a node ID and create the router, retrying on the unique(node_id)
+	// constraint: a concurrent createRouter may have taken the same gap between
+	// our read and our insert (read-then-insert race → previously duplicate IPs).
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const allRouters = await models.routers.findAll({ attributes: ["nodeId"] });
+		const existingIds = allRouters.map((r) => r.get("nodeId") as number);
+		const nextNodeId = getNextAvailableNodeId(continent, existingIds);
 
-		return success(c, {
-			message: "Router created",
-			router: {
-				uuid: router.get("uuid"),
-				nodeId: router.get("nodeId"),
-				name: router.get("name"),
-				regionCode: router.get("regionCode"),
-				loopback4: router.get("dn42Loopback4"),
-				loopback6: router.get("dn42Loopback6"),
-			},
-		});
-	} catch (error) {
-		console.error("[Admin] Error creating router:", error);
-		return makeResponse(
-			c,
-			ResponseCode.INTERNAL_ERROR,
-			undefined,
-			"Failed to create router",
-		);
+		if (nextNodeId === null) {
+			return makeResponse(
+				c,
+				ResponseCode.VALIDATION_ERROR,
+				undefined,
+				`No available node IDs for continent ${continent}. Range is full.`,
+			);
+		}
+
+		try {
+			const router = await models.routers.create({
+				name: body.name,
+				location: body.location,
+				publicIp: body.ipv4 || null,
+				publicIpv6: body.ipv6 || null,
+				nodeType,
+				provider: body.provider || null,
+				bandwidth: body.bandwidth || null,
+				maxPeers: body.maxPeers || 20,
+				allowCnPeers: body.allowCnPeers ?? true,
+				bootstrapToken: body.bootstrapToken || null,
+				nodeId: nextNodeId,
+				regionCode,
+				supportsIpv4: !!body.ipv4,
+				supportsIpv6: !!body.ipv6,
+				// Auto-generate loopback IPs via IP allocator
+				dn42Loopback4: computeLoopbackIPv4(nextNodeId),
+				dn42Loopback6: computeLoopbackIPv6(regionCode, nextNodeId),
+				// biome-ignore lint/suspicious/noExplicitAny: dynamic Sequelize create attributes
+			} as any);
+
+			return success(c, {
+				message: "Router created",
+				router: {
+					uuid: router.get("uuid"),
+					nodeId: router.get("nodeId"),
+					name: router.get("name"),
+					regionCode: router.get("regionCode"),
+					loopback4: router.get("dn42Loopback4"),
+					loopback6: router.get("dn42Loopback6"),
+				},
+			});
+		} catch (error) {
+			if (error instanceof UniqueConstraintError) {
+				console.warn(
+					`[Admin] node_id ${nextNodeId} taken concurrently, retrying (${attempt + 1}/5)`,
+				);
+				continue;
+			}
+			console.error("[Admin] Error creating router:", error);
+			return makeResponse(
+				c,
+				ResponseCode.INTERNAL_ERROR,
+				undefined,
+				"Failed to create router",
+			);
+		}
 	}
+
+	return makeResponse(
+		c,
+		ResponseCode.INTERNAL_ERROR,
+		undefined,
+		"Failed to allocate a unique node ID after retries",
+	);
 }
 
 /**
@@ -420,8 +472,18 @@ async function updateRouter(
 
 	const models = getModels();
 
+	const updates = pickRouterUpdatableFields(body.updates);
+	if (Object.keys(updates).length === 0) {
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"No updatable fields provided",
+		);
+	}
+
 	try {
-		const [updated] = await models.routers.update(body.updates, {
+		const [updated] = await models.routers.update(updates, {
 			where: { name: body.name },
 		});
 
@@ -444,6 +506,53 @@ async function updateRouter(
 	}
 
 	return success(c, { message: "Router updated" });
+}
+
+/**
+ * Regenerate a router's bootstrap token.
+ *
+ * bootstrapToken is deliberately NOT in ROUTER_ADMIN_UPDATABLE (it's a security
+ * credential, not a free-form field), so it can't be set via updateRouter. This
+ * dedicated action generates a fresh token server-side and returns it, so the
+ * "refresh token" button has a working path. One-time-use is enforced elsewhere
+ * (bootstrap consumes and nulls it).
+ */
+async function regenerateBootstrapToken(
+	c: Context,
+	body: { name?: string; router?: string },
+): Promise<Response> {
+	const identifier = body.name || body.router;
+	if (!identifier) {
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"Missing name or router",
+		);
+	}
+
+	const models = getModels();
+	const isUuid =
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+			identifier,
+		);
+	const whereClause = isUuid ? { uuid: identifier } : { name: identifier };
+
+	const router = await models.routers.findOne({ where: whereClause });
+	if (!router) {
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Router not found",
+		);
+	}
+
+	// 24 url-safe chars (fits the STRING(32) column).
+	const token = randomBytes(18).toString("base64url");
+	await router.update({ bootstrapToken: token });
+
+	return success(c, { token });
 }
 
 /**
@@ -473,11 +582,11 @@ async function deleteRouter(
 	const whereClause = isUuid ? { uuid: identifier } : { name: identifier };
 
 	try {
-		const deleted = await models.routers.destroy({
-			where: whereClause,
-		});
-
-		if (!deleted) {
+		// Resolve the router first so we can cascade to its sessions. There is no
+		// DB-level ON DELETE CASCADE, so deleting the router alone would leave its
+		// bgpSessions orphaned (dangling router UUID the agent never cleans up).
+		const router = await models.routers.findOne({ where: whereClause });
+		if (!router) {
 			return makeResponse(
 				c,
 				ResponseCode.NOT_FOUND,
@@ -485,6 +594,17 @@ async function deleteRouter(
 				"Router not found",
 			);
 		}
+		const routerUuid = router.get("uuid") as string;
+
+		const sessionsDeleted = await models.bgpSessions.destroy({
+			where: { router: routerUuid },
+		});
+		await router.destroy();
+
+		return success(c, {
+			message: "Router deleted",
+			sessionsDeleted,
+		});
 	} catch (error) {
 		console.error("[Admin] Error deleting router:", error);
 		return makeResponse(
@@ -494,8 +614,6 @@ async function deleteRouter(
 			"Failed to delete router",
 		);
 	}
-
-	return success(c, { message: "Router deleted" });
 }
 
 /**
@@ -520,7 +638,7 @@ async function enumSessions(
 		order: [["created_at", "DESC"]],
 	});
 
-	// Resolve router names
+	// Resolve router names + server-side connection info
 	const routerUuids = [
 		...new Set(sessions.map((s) => s.get("router") as string)),
 	];
@@ -528,14 +646,41 @@ async function enumSessions(
 		where: { uuid: routerUuids },
 	});
 	const routerMap = new Map(
-		routers.map((r) => [r.get("uuid") as string, r.get("name") as string]),
+		routers.map((r) => [
+			r.get("uuid") as string,
+			{
+				name: r.get("name") as string,
+				publicIp: r.get("publicIp") as string | null,
+				publicIpv6: r.get("publicIpv6") as string | null,
+				wgPublicKey: r.get("wgPublicKey") as string | null,
+			},
+		]),
 	);
 
 	return success(c, {
-		sessions: sessions.map((s) => ({
-			...s.get(),
-			routerName: routerMap.get(s.get("router") as string) || s.get("router"),
-		})),
+		sessions: sessions.map((s) => {
+			const raw = s.get();
+			const routerInfo = routerMap.get(raw.router as string);
+
+			// listen_port is deterministic from ASN (see getListenPort + createSession).
+			// Don't parse `credential`: it's a JSONB column, so Sequelize returns an
+			// object, not a string — the old `typeof === "string"` guard always failed.
+			const listenPort = getListenPort(raw.asn as number);
+
+			let serverEndpoint: string | null = null;
+			if (routerInfo?.publicIp) {
+				serverEndpoint = `${routerInfo.publicIp}:${listenPort}`;
+			} else if (routerInfo?.publicIpv6) {
+				serverEndpoint = `[${routerInfo.publicIpv6}]:${listenPort}`;
+			}
+
+			return {
+				...raw,
+				routerName: routerInfo?.name || raw.router,
+				serverEndpoint,
+				serverWgKey: routerInfo?.wgPublicKey || null,
+			};
+		}),
 	});
 }
 
@@ -675,7 +820,7 @@ async function rejectSession(
  */
 async function deleteSessionAdmin(
 	c: Context,
-	body: { uuid?: string },
+	body: { uuid?: string; force?: boolean },
 ): Promise<Response> {
 	if (!body.uuid) {
 		return makeResponse(
@@ -688,8 +833,39 @@ async function deleteSessionAdmin(
 
 	const models = getModels();
 
-	// Only delete sessions that are not already queued for deletion
-	const [updated] = await models.bgpSessions.update(
+	const session = await models.bgpSessions.findOne({
+		where: { uuid: body.uuid },
+	});
+	if (!session) {
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Session not found",
+		);
+	}
+
+	// The normal teardown just marks QUEUED_FOR_DELETE and waits for the node's
+	// agent to clean up WG/BIRD and report completion (which destroys the row).
+	// But if the node is OFFLINE it never processes that — the row would linger
+	// forever and the peer can't be deleted. In that case (or when forced) delete
+	// the row directly; if the node ever returns, its orphan cleanup removes any
+	// stale WG/BIRD config.
+	const routerUuid = session.get("router") as string;
+	const router = await models.routers.findOne({
+		where: { uuid: routerUuid },
+		attributes: ["lastSeen"],
+	});
+	const lastSeen = router?.get("lastSeen") as Date | string | null | undefined;
+	const online =
+		!!lastSeen && Date.now() - new Date(lastSeen).getTime() < 5 * 60 * 1000;
+
+	if (body.force || !online) {
+		await session.destroy();
+		return success(c, { message: "Session deleted", deleted: true });
+	}
+
+	await models.bgpSessions.update(
 		{ status: PeeringStatus.QUEUED_FOR_DELETE },
 		{
 			where: {
@@ -698,17 +874,7 @@ async function deleteSessionAdmin(
 			},
 		},
 	);
-
-	if (!updated) {
-		return makeResponse(
-			c,
-			ResponseCode.NOT_FOUND,
-			undefined,
-			"Session not found or already queued for deletion",
-		);
-	}
-
-	return success(c, { message: "Session queued for deletion" });
+	return success(c, { message: "Session queued for deletion", queued: true });
 }
 
 /**
@@ -853,6 +1019,26 @@ async function updateSessionAdmin(
 			}
 		}
 		credObj.preshared_key = updates.psk ?? null;
+		updateData.credential = JSON.stringify(credObj);
+	}
+
+	// Special handling: the peer's WireGuard public key lives inside credential
+	// JSON as public_key (there is no top-level column), so merge it in the same
+	// way as psk. Read from updateData.credential if psk already touched it.
+	if ("publicKey" in updates || "pubkey" in updates) {
+		const pub = (updates.publicKey ?? updates.pubkey) as string;
+		const base =
+			(updateData.credential as string) ??
+			(session.get("credential") as string | null);
+		let credObj: Record<string, unknown> = {};
+		if (base) {
+			try {
+				credObj = typeof base === "string" ? JSON.parse(base) : base;
+			} catch {
+				/* use empty */
+			}
+		}
+		credObj.public_key = pub;
 		updateData.credential = JSON.stringify(credObj);
 	}
 
@@ -2002,9 +2188,9 @@ async function generateSnapshot(c: Context): Promise<Response> {
  */
 async function registerTelegramId(
 	c: Context,
-	body: { asn?: number; telegramId?: number | string },
+	body: { asn?: number; telegramId?: number | string; username?: string },
 ): Promise<Response> {
-	const { asn, telegramId } = body;
+	const { asn, telegramId, username } = body;
 
 	if (asn == null || telegramId == null) {
 		return makeResponse(
@@ -2020,21 +2206,28 @@ async function registerTelegramId(
 	try {
 		const [user, created] = await models.users.findOrCreate({
 			where: { asn: Number(asn) },
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			defaults: {
 				asn: Number(asn),
 				telegramId: Number(telegramId),
 				isAdmin: false,
 				isBlocked: false,
+				// biome-ignore lint/suspicious/noExplicitAny: id is auto-increment
 			} as any,
 		});
 
 		if (!created) {
-			await user.update({ telegramId: Number(telegramId) });
+			const updates: Record<string, unknown> = {
+				telegramId: Number(telegramId),
+			};
+			// Update username if provided (it can change)
+			if (username !== undefined) {
+				updates.username = username || null;
+			}
+			await user.update(updates);
 		}
 
 		console.log(
-			`[Admin] ${created ? "Created" : "Updated"} user AS${asn} with telegramId ${telegramId}`,
+			`[Admin] ${created ? "Created" : "Updated"} user AS${asn} with telegramId ${telegramId}${username ? ` (@${username})` : ""}`,
 		);
 		return success(c, { message: "User registered", created });
 	} catch (error) {
@@ -2049,8 +2242,16 @@ async function registerTelegramId(
 }
 
 /**
- * Get notification targets — users with active BGP sessions and a registered telegramId.
- * Optionally filter by ASN list.
+ * Get notification targets — unified per-ASN structure with all available
+ * contact channels (TG + Email) for dual-channel announcement sending.
+ *
+ * Resolution chain for TG:
+ *   1. users table (telegramId) — most authoritative
+ *   2. bgp_sessions.contact (@username) → Redis cache
+ *   3. bgp_sessions.contact (@username) → MTProto API → upsert users table
+ *
+ * Emails are collected from bgp_sessions.contact for ALL ASNs, enabling
+ * dual-channel delivery where both TG and email are available.
  */
 async function getNotificationTargets(
 	c: Context,
@@ -2062,10 +2263,8 @@ async function getNotificationTargets(
 		let targetAsns: number[];
 
 		if (body.asns && body.asns.length > 0) {
-			// Targeted notification: query users directly by ASN (no bgp_sessions filter)
 			targetAsns = body.asns.map(Number);
 		} else {
-			// Build where clause for bgp_sessions
 			const sessionWhere: Record<string, unknown> = {
 				status: {
 					[Op.in]: [
@@ -2076,7 +2275,6 @@ async function getNotificationTargets(
 				},
 			};
 
-			// Optional: filter by specific routers (for node-targeted announcements)
 			if (body.routers && body.routers.length > 0) {
 				sessionWhere.router = { [Op.in]: body.routers };
 			}
@@ -2090,10 +2288,19 @@ async function getNotificationTargets(
 		}
 
 		if (targetAsns.length === 0) {
-			return success(c, { targets: [] });
+			return success(c, { targets: [], allAsns: [] });
 		}
 
-		// Find users with telegramId for those ASNs
+		// Step 1: Build per-ASN target map
+		const targetMap = new Map<
+			number,
+			{ asn: number; telegramId?: number; emails: string[] }
+		>();
+		for (const asn of targetAsns) {
+			targetMap.set(asn, { asn, emails: [] });
+		}
+
+		// Step 2: Fill TG IDs from users table (most authoritative source)
 		const users = await models.users.findAll({
 			where: {
 				asn: { [Op.in]: targetAsns },
@@ -2101,70 +2308,123 @@ async function getNotificationTargets(
 			},
 		});
 
-		const targets = users.map((u) => ({
-			asn: u.get("asn") as number,
-			telegramId: u.get("telegramId") as number,
-		}));
+		for (const u of users) {
+			const asn = u.get("asn") as number;
+			const t = targetMap.get(asn);
+			if (t) t.telegramId = u.get("telegramId") as number;
+		}
 
-		// For ASNs not in users table, try to resolve via bgp_sessions.contact
-		const foundAsns = new Set(targets.map((t) => t.asn));
-		const missingAsns = targetAsns.filter((a) => !foundAsns.has(a));
+		// Step 3: Query bgp_sessions.contact for ALL target ASNs (dual-channel)
+		const contactSessions = await models.bgpSessions.findAll({
+			where: {
+				asn: { [Op.in]: targetAsns },
+				contact: { [Op.ne]: null },
+			},
+			attributes: ["asn", "contact"],
+			group: ["asn", "contact"],
+		});
 
-		const emailFallbacks: Array<{ asn: number; email: string }> = [];
-		if (missingAsns.length > 0) {
-			const sessions = await models.bgpSessions.findAll({
-				where: {
-					asn: { [Op.in]: missingAsns },
-					contact: { [Op.ne]: null },
-				},
-				attributes: ["asn", "contact"],
-				group: ["asn", "contact"],
-			});
+		const redis = getRedis();
+		const mtprotoQueue: Array<{ asn: number; username: string }> = [];
 
-			const redis = getRedis();
+		for (const s of contactSessions) {
+			const contact = ((s.get("contact") as string) || "").trim();
+			const asn = s.get("asn") as number;
+			const t = targetMap.get(asn);
+			if (!t) continue;
 
-			for (const s of sessions) {
-				const contact = ((s.get("contact") as string) || "").trim();
-				const asn = s.get("asn") as number;
+			// Parse contact: @username or telegram:@xxx → TG; email@xxx → email
+			let username: string | null = null;
+			if (contact.startsWith("@")) {
+				username = contact.slice(1).toLowerCase();
+			} else if (contact.toLowerCase().startsWith("telegram:")) {
+				const match = contact.match(/@(\w+)/);
+				if (match?.[1]) username = match[1].toLowerCase();
+			}
 
-				// Already resolved this ASN
-				if (foundAsns.has(asn)) continue;
-
-				// Try to resolve @username via Redis cache
-				let username: string | null = null;
-				if (contact.startsWith("@")) {
-					username = contact.slice(1).toLowerCase();
-				} else if (contact.toLowerCase().startsWith("telegram:")) {
-					// "telegram: @username" or "Telegram: @abc123"
-					const match = contact.match(/@(\w+)/);
-					if (match?.[1]) username = match[1].toLowerCase();
-				}
-
-				if (username) {
-					try {
-						const cachedId = await redis.get(`tg:username:${username}`);
-						if (cachedId) {
-							targets.push({ asn, telegramId: Number(cachedId) });
-							foundAsns.add(asn);
-							continue;
-						}
-					} catch {
-						// Redis unavailable, skip
+			// TG username resolution (only if no telegramId yet from users table)
+			if (username && !t.telegramId) {
+				try {
+					const cachedId = await redis.get(`tg:username:${username}`);
+					if (cachedId) {
+						t.telegramId = Number(cachedId);
+					} else {
+						mtprotoQueue.push({ asn, username });
 					}
+				} catch {
+					mtprotoQueue.push({ asn, username });
 				}
+			}
 
-				// Email fallback: contact contains @ but is not a telegram username
-				if (
-					contact.includes("@") &&
-					!contact.startsWith("@") &&
-					!contact.toLowerCase().startsWith("telegram:")
-				) {
-					emailFallbacks.push({ asn, email: contact });
+			// Email: always collect (for dual-channel sending)
+			if (
+				contact.includes("@") &&
+				!contact.startsWith("@") &&
+				!contact.toLowerCase().startsWith("telegram:")
+			) {
+				if (!t.emails.includes(contact)) {
+					t.emails.push(contact);
 				}
 			}
 		}
 
-		return success(c, { targets, emailFallbacks, allAsns: targetAsns });
+		// Step 4: MTProto resolution for unresolved usernames
+		if (mtprotoQueue.length > 0) {
+			const { resolveUsername } = await import(
+				"../providers/telegram-resolver"
+			);
+
+			for (const item of mtprotoQueue) {
+				const t = targetMap.get(item.asn);
+				if (!t || t.telegramId) continue;
+
+				const resolvedId = await resolveUsername(item.username);
+				if (resolvedId) {
+					t.telegramId = resolvedId;
+
+					// Persist to Redis cache (non-blocking)
+					redis
+						.set(
+							`tg:username:${item.username}`,
+							String(resolvedId),
+							"EX",
+							86400 * 90,
+						)
+						.catch(() => {});
+
+					// Persist to users table (non-blocking upsert)
+					models.users
+						.findOrCreate({
+							where: { asn: item.asn },
+							defaults: {
+								asn: item.asn,
+								telegramId: resolvedId,
+								isAdmin: false,
+								isBlocked: false,
+								// biome-ignore lint/suspicious/noExplicitAny: id is auto-increment
+							} as any,
+						})
+						.then(([user, created]) => {
+							if (!created) {
+								user.update({
+									telegramId: resolvedId,
+								});
+							}
+						})
+						.catch((err) => {
+							console.error(
+								`[Admin] Failed to persist MTProto-resolved user AS${item.asn}:`,
+								err,
+							);
+						});
+				}
+			}
+		}
+
+		return success(c, {
+			targets: [...targetMap.values()],
+			allAsns: targetAsns,
+		});
 	} catch (error) {
 		console.error("[Admin] Error getting notification targets:", error);
 		return makeResponse(
@@ -2331,8 +2591,21 @@ async function checkMigrationNotify(
 	const redis = getRedis();
 	const models = getModels();
 
-	// Scan for pending migration notification keys
-	const keys = await redis.keys("migrate:notify:*");
+	// Scan for pending migration notification keys. Use SCAN, not KEYS — KEYS is
+	// an O(N) command that blocks the whole Redis server across the keyspace.
+	const keys: string[] = [];
+	let cursor = "0";
+	do {
+		const [next, batch] = await redis.scan(
+			cursor,
+			"MATCH",
+			"migrate:notify:*",
+			"COUNT",
+			100,
+		);
+		cursor = next;
+		keys.push(...batch);
+	} while (cursor !== "0");
 	if (keys.length === 0) {
 		return success(c, { ready: [], pending: 0 });
 	}
@@ -2343,6 +2616,7 @@ async function checkMigrationNotify(
 		toRouter: string;
 		adminChatId?: number;
 		serverEndpoint: string | null;
+		attempts: number;
 	}> = [];
 
 	for (const key of keys) {
@@ -2356,6 +2630,7 @@ async function checkMigrationNotify(
 			fromRouter: string;
 			toRouter: string;
 			adminChatId?: number;
+			attempts?: number;
 		};
 
 		// Check if this ASN has an ENABLED session (setup completed)
@@ -2372,31 +2647,109 @@ async function checkMigrationNotify(
 			});
 			const publicIp = router?.get("publicIp") as string | null;
 
+			const publicIpv6 = router?.get("publicIpv6") as string | null;
+			// listen_port is deterministic from ASN (credential is JSONB, so the
+			// old string-parse always failed → endpoint was never resolved).
+			const listenPort = getListenPort(asn);
+
 			let serverEndpoint: string | null = null;
-			const credential = session.get("credential") as string | null;
-			if (credential) {
-				try {
-					const cred = JSON.parse(credential);
-					if (publicIp && cred.listen_port) {
-						serverEndpoint = `${publicIp}:${cred.listen_port}`;
-					}
-				} catch {
-					/* ignore */
-				}
+			if (publicIp) {
+				serverEndpoint = `${publicIp}:${listenPort}`;
+			} else if (publicIpv6) {
+				serverEndpoint = `[${publicIpv6}]:${listenPort}`;
 			}
 
+			const attempts = (data.attempts ?? 0) + 1;
 			ready.push({
 				asn,
 				fromRouter: data.fromRouter,
 				toRouter: data.toRouter,
 				adminChatId: data.adminChatId,
 				serverEndpoint,
+				attempts,
 			});
 
-			// Clean up — notification consumed
-			await redis.del(key);
+			// Do NOT delete here — the bot acks (ackMigrationNotify) only after it
+			// confirms delivery, so a failed/skipped send retries next tick instead
+			// of being lost. Bump the attempt counter, preserving the original TTL
+			// (KEEPTTL) so the entry still auto-expires after 24h as a backstop.
+			await redis.set(key, JSON.stringify({ ...data, attempts }), "KEEPTTL");
 		}
 	}
 
 	return success(c, { ready, pending: keys.length - ready.length });
+}
+
+/**
+ * Delete migration-notify queue entries the bot has finished with (delivered, or
+ * given up after exhausting retries). This is the second half of the two-phase
+ * delivery: checkMigrationNotify no longer consumes on read.
+ */
+async function ackMigrationNotify(
+	c: Context,
+	body: { asns?: number[] },
+): Promise<Response> {
+	const asns = body.asns;
+	if (!Array.isArray(asns) || asns.length === 0) {
+		return success(c, { acked: 0 });
+	}
+	const redis = getRedis();
+	let acked = 0;
+	for (const asn of asns) {
+		const n = await redis.del(`migrate:notify:${Number(asn)}`);
+		acked += n;
+	}
+	return success(c, { acked });
+}
+
+/**
+ * Send a migration notification to a peer by email (fallback channel when the
+ * user has no linked Telegram, or Telegram delivery failed).
+ */
+async function sendMigrationEmail(
+	c: Context,
+	body: {
+		email?: string;
+		asn?: number;
+		fromRouter?: string;
+		toRouter?: string;
+		serverEndpoint?: string | null;
+	},
+): Promise<Response> {
+	const { email, asn, fromRouter, toRouter, serverEndpoint } = body;
+	if (!email || !asn) {
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"Missing email or asn",
+		);
+	}
+	const provider = getEmailProvider();
+	if (!provider.isEnabled()) {
+		return makeResponse(
+			c,
+			ResponseCode.INTERNAL_ERROR,
+			undefined,
+			"Email not configured",
+		);
+	}
+
+	const subject = `[MoeNet DN42] Peer Migrated — AS${asn}`;
+	const text =
+		`Your peer AS${asn} has been migrated from ${fromRouter ?? "?"} to ${toRouter ?? "?"}.\n\n` +
+		(serverEndpoint ? `New server endpoint: ${serverEndpoint}\n\n` : "") +
+		`Action required: please update your WireGuard Endpoint. ` +
+		`Use /info in the MoeNet bot to view your full config.`;
+
+	const result = await provider.send({ to: email, subject, text });
+	if (!result.success) {
+		return makeResponse(
+			c,
+			ResponseCode.INTERNAL_ERROR,
+			undefined,
+			result.error || "Email send failed",
+		);
+	}
+	return success(c, { sent: true });
 }

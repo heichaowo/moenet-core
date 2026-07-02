@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import config from "./config";
@@ -13,6 +14,9 @@ const app = new Hono();
 // Middleware
 app.use("*", requestId());
 app.use("*", logger());
+// Cap request bodies (1 MB) to prevent memory-exhaustion DoS — all real
+// payloads here (agent sync, peer config) are far smaller.
+app.use("*", bodyLimit({ maxSize: 1024 * 1024 }));
 app.use("*", rateLimiter());
 app.use(
 	"*",
@@ -33,12 +37,13 @@ async function main() {
 	const standalone = process.env.STANDALONE === "true";
 
 	try {
+		// Validate the JWT secret unconditionally — even standalone must not sign
+		// tokens with the known default (a misconfigured standalone could reach prod).
+		if (config.auth.jwtSecret === "change-me-in-production") {
+			console.error("❌ JWT_SECRET must be set (cannot use default value)");
+			process.exit(1);
+		}
 		if (!standalone) {
-			// Validate critical secrets
-			if (config.auth.jwtSecret === "change-me-in-production") {
-				console.error("❌ JWT_SECRET must be set (cannot use default value)");
-				process.exit(1);
-			}
 			if (!config.auth.agentApiKey) {
 				console.warn(
 					"⚠️  AGENT_API_KEY not set — agent/admin API will reject all requests",
@@ -65,6 +70,9 @@ main();
 
 export default {
 	port: config.server.port,
-	hostname: "0.0.0.0",
+	// Was hardcoded "0.0.0.0", ignoring config.server.host (bug-list #7).
+	// config.server.host defaults to "0.0.0.0" so container behaviour is
+	// unchanged, but it can now be restricted via the HOST env var.
+	hostname: config.server.host,
 	fetch: app.fetch,
 };

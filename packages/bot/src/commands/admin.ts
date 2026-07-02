@@ -147,39 +147,51 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle reject button
+	// Reject: ask for an optional reason first (the reason is stored on the
+	// session's lastError so the peer can see why). "rejnow:" skips the reason.
 	bot.callbackQuery(/^reject:(.+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
+		const uuid = ctx.match[1] as string;
+		ctx.session.rejectReason = { uuid };
+		await ctx.answerCallbackQuery();
+		await ctx.reply(
+			"✍️ *Rejection reason* (optional)\n拒绝理由(可选)\n\n" +
+				"Type a reason, or tap below to reject without one.\n" +
+				"输入理由,或点下方直接拒绝。",
+			{
+				parse_mode: "Markdown",
+				reply_markup: new InlineKeyboard()
+					.text("⏩ Reject w/o reason 无理由拒绝", `rejnow:${uuid}`)
+					.row()
+					.text("🔙 Cancel 取消", "pending:refresh"),
+			},
+		);
+	});
 
-		const uuid = ctx.match[1];
-
-		try {
-			const result = await apiRequest(
-				"/admin",
-				"POST",
-				{
-					action: "rejectSession",
-					uuid,
-					reason: "Rejected by admin",
-				},
-				config.apiToken,
-			);
-
-			if (result.code !== 0) {
-				await ctx.answerCallbackQuery(`❌ ${result.message}`);
-				return;
-			}
-
-			await ctx.answerCallbackQuery("✅ Rejected!");
-
-			// Refresh the list
-			await showPendingList(ctx, ctx.callbackQuery.message?.message_id);
-		} catch (error) {
-			console.error("[Reject] Error:", error);
-			await ctx.answerCallbackQuery("❌ Failed");
+	// Reject without a reason.
+	bot.callbackQuery(/^rejnow:(.+)$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
 		}
+		await ctx.answerCallbackQuery();
+		await submitReject(ctx, ctx.match[1] as string, "Rejected by admin");
+	});
+
+	// Collect a typed rejection reason.
+	bot.on("message:text", async (ctx, next) => {
+		const pending = ctx.session.rejectReason;
+		if (!pending) return next();
+		const text = ctx.message.text.trim();
+		if (text === "/cancel") {
+			ctx.session.rejectReason = undefined;
+			await ctx.reply("🚫 Cancelled.");
+			return;
+		}
+		await submitReject(ctx, pending.uuid, text || "Rejected by admin");
 	});
 
 	// Handle refresh button
@@ -213,7 +225,11 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			{ action: "enumRouters" },
 			config.apiToken,
 		);
-		const routers = result.data?.routers || [];
+		const routers = (result.data?.routers || []) as Array<{
+			uuid: string;
+			name?: string;
+			region?: string;
+		}>;
 
 		if (routers.length < 2) {
 			await ctx.reply(
@@ -222,22 +238,30 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			return;
 		}
 
+		// Store routers in session and reference them by index in callback_data.
+		// Embedding two UUIDs would exceed Telegram's 64-byte callback_data limit.
+		ctx.session.migrateFlow = {
+			routers: routers.map((r) => ({
+				uuid: r.uuid,
+				name: r.name || r.uuid,
+				region: r.region,
+			})),
+		};
+
 		const message =
 			`🔄 *Node Migration 节点迁移*\n\n` +
 			`Select the *source* node (migrate FROM):\n` +
 			`选择*源节点*（从哪个节点迁出）:\n\n`;
 
 		const keyboard = new InlineKeyboard();
-		for (const r of routers) {
-			const name = r.name || r.uuid;
-			const region = r.region || "";
+		ctx.session.migrateFlow.routers.forEach((r, i) => {
 			keyboard
 				.text(
-					`📍 ${name} ${region ? `(${region})` : ""}`,
-					`migrate:from:${r.uuid}`,
+					`📍 ${r.name} ${r.region ? `(${r.region})` : ""}`,
+					`migrate:from:${i}`,
 				)
 				.row();
-		}
+		});
 		keyboard.text("🚫 Cancel 取消", "migrate:cancel");
 
 		await ctx.reply(message, {
@@ -247,29 +271,25 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle source node selection
-	bot.callbackQuery(/^migrate:from:(.+)$/, async (ctx) => {
+	bot.callbackQuery(/^migrate:from:(\d+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
-
-		const fromRouter = ctx.match[1];
 		await ctx.answerCallbackQuery();
 
-		// Fetch routers to show targets (exclude source)
-		const result = await apiRequest(
-			"/admin",
-			"POST",
-			{ action: "enumRouters" },
-			config.apiToken,
-		);
-		const routers = (result.data?.routers || []).filter(
-			(r: { uuid: string }) => r.uuid !== fromRouter,
-		);
-		const sourceRouter = (result.data?.routers || []).find(
-			(r: { uuid: string }) => r.uuid === fromRouter!,
-		);
-		const sourceName = sourceRouter?.name || fromRouter!.slice(0, 8);
+		const flow = ctx.session.migrateFlow;
+		const fromIdx = Number(ctx.match[1]);
+		if (!flow || !flow.routers[fromIdx]) {
+			await ctx.editMessageText(
+				"❌ Session expired. Run /migrate again.\n会话已过期，请重新执行 /migrate",
+			);
+			return;
+		}
+
+		flow.fromIdx = fromIdx;
+		ctx.session.migrateFlow = flow;
+		const sourceName = flow.routers[fromIdx]!.name;
 
 		const message =
 			`🔄 *Migration 迁移*\n\n` +
@@ -278,16 +298,15 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			`选择*目标节点*（迁移到哪个节点）:\n\n`;
 
 		const keyboard = new InlineKeyboard();
-		for (const r of routers) {
-			const name = r.name || r.uuid;
-			const region = r.region || "";
+		flow.routers.forEach((r, i) => {
+			if (i === fromIdx) return; // exclude source
 			keyboard
 				.text(
-					`📍 ${name} ${region ? `(${region})` : ""}`,
-					`migrate:to:${fromRouter}:${r.uuid}`,
+					`📍 ${r.name} ${r.region ? `(${r.region})` : ""}`,
+					`migrate:to:${i}`,
 				)
 				.row();
-		}
+		});
 		keyboard.text("🚫 Cancel 取消", "migrate:cancel");
 
 		await ctx.editMessageText(message, {
@@ -297,15 +316,31 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle target node selection → dry run preview
-	bot.callbackQuery(/^migrate:to:(.+):(.+)$/, async (ctx) => {
+	bot.callbackQuery(/^migrate:to:(\d+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
-
-		const fromRouter = ctx.match[1];
-		const toRouter = ctx.match[2];
 		await ctx.answerCallbackQuery("Loading preview...");
+
+		const flow = ctx.session.migrateFlow;
+		const toIdx = Number(ctx.match[1]);
+		if (
+			!flow ||
+			flow.fromIdx === undefined ||
+			!flow.routers[flow.fromIdx] ||
+			!flow.routers[toIdx]
+		) {
+			await ctx.editMessageText(
+				"❌ Session expired. Run /migrate again.\n会话已过期，请重新执行 /migrate",
+			);
+			return;
+		}
+
+		flow.toIdx = toIdx;
+		ctx.session.migrateFlow = flow;
+		const fromRouter = flow.routers[flow.fromIdx]!.uuid;
+		const toRouter = flow.routers[toIdx]!.uuid;
 
 		// Dry run to preview
 		const result = await apiRequest(
@@ -362,7 +397,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			`确认执行迁移？所有会话将从 ${fromName} 迁移到 ${toName}。`;
 
 		const keyboard = new InlineKeyboard()
-			.text("✅ Confirm 确认迁移", `migrate:exec:${fromRouter}:${toRouter}`)
+			.text("✅ Confirm 确认迁移", "migrate:exec")
 			.text("🚫 Cancel 取消", "migrate:cancel");
 
 		await ctx.editMessageText(message, {
@@ -372,14 +407,29 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle migration execution
-	bot.callbackQuery(/^migrate:exec:(.+):(.+)$/, async (ctx) => {
+	bot.callbackQuery("migrate:exec", async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
 
-		const fromRouter = ctx.match[1];
-		const toRouter = ctx.match[2];
+		const flow = ctx.session.migrateFlow;
+		if (
+			!flow ||
+			flow.fromIdx === undefined ||
+			flow.toIdx === undefined ||
+			!flow.routers[flow.fromIdx] ||
+			!flow.routers[flow.toIdx]
+		) {
+			await ctx.answerCallbackQuery();
+			await ctx.editMessageText(
+				"❌ Session expired. Run /migrate again.\n会话已过期，请重新执行 /migrate",
+			);
+			return;
+		}
+
+		const fromRouter = flow.routers[flow.fromIdx]!.uuid;
+		const toRouter = flow.routers[flow.toIdx]!.uuid;
 		await ctx.answerCallbackQuery("Migrating...");
 		await ctx.editMessageText("⏳ Migration in progress...\n正在执行迁移...");
 
@@ -416,23 +466,71 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			results: Array<{ asn: number; status: string; error?: string }>;
 		};
 
+		const migratedAsns = results
+			.filter((r) => r.status === "ok")
+			.map((r) => r.asn);
+
+		// Best-effort: fetch the target node's server details so the admin sees
+		// the new endpoint/key the migrated peers will reconnect to.
+		let targetInfo = "";
+		try {
+			const tr = await apiRequest(
+				"/admin",
+				"POST",
+				{ action: "getRouter", name: toName },
+				config.apiToken,
+			);
+			const router = (
+				tr.data as {
+					router?: {
+						wgPublicKey?: string;
+						publicIp?: string;
+						publicIpv6?: string;
+					};
+				}
+			)?.router;
+			if (router) {
+				const host =
+					router.publicIp ||
+					(router.publicIpv6
+						? `[${router.publicIpv6}]`
+						: `${toName}.dn42.moenet.work`);
+				targetInfo =
+					`\n📡 *Target node ${escapeMarkdown(toName)}:*\n` +
+					`   Host 主机: \`${host}\`\n` +
+					(router.wgPublicKey
+						? `   WG PubKey 公钥: \`${router.wgPublicKey}\`\n`
+						: "") +
+					`   _Listen port is per-ASN; each peer gets its exact config in the notification._\n`;
+			}
+		} catch (e) {
+			console.warn("[Migrate] failed to fetch target node details:", e);
+		}
+
 		let message =
 			`✅ *Migration Complete 迁移完成*\n\n` +
-			`From 源: \`${fromName}\`\n` +
-			`To 目标: \`${toName}\`\n\n` +
-			`✅ Migrated 已迁移: *${migrated}*\n`;
+			`📤 From 源: \`${fromName}\`  →  📥 To 目标: \`${toName}\`\n` +
+			`${DIVIDER}\n` +
+			`✅ Migrated 已迁移: *${migrated}*` +
+			(failed > 0 ? `   ❌ Failed 失败: *${failed}*` : "") +
+			`\n`;
+
+		if (migratedAsns.length > 0) {
+			message += migratedAsns.map((a) => `\`AS${a}\``).join("  ") + `\n`;
+		}
 
 		if (failed > 0) {
-			message += `❌ Failed 失败: *${failed}*\n\n`;
-			message += `*Failures:*\n`;
+			message += `\n*Failures 失败详情:*\n`;
 			for (const r of results.filter((r) => r.status === "error")) {
 				message += `• AS${r.asn}: ${escapeMarkdown(r.error || "unknown")}\n`;
 			}
 		}
 
+		message += targetInfo;
+
 		message +=
-			`\n⏳ Users will be notified automatically once new sessions are active.\n` +
-			`用户将在新会话激活后自动收到通知。`;
+			`\n⏳ Users auto-notified once new sessions are active.\n` +
+			`新会话激活后自动通知用户（已加入通知队列）。`;
 
 		await ctx.editMessageText(message, { parse_mode: "Markdown" });
 
@@ -456,6 +554,8 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 				config.apiToken,
 			);
 		}
+
+		ctx.session.migrateFlow = undefined;
 	});
 
 	// Handle cancel
@@ -465,6 +565,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			return;
 		}
 		await ctx.answerCallbackQuery("Cancelled");
+		ctx.session.migrateFlow = undefined;
 		await ctx.editMessageText("🚫 Migration cancelled.\n迁移已取消。");
 	});
 
@@ -915,62 +1016,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		}
 	}
 
-	/**
-	 * /nodes - List all nodes
-	 */
-	bot.command("nodes", async (ctx) => {
-		try {
-			const result = await apiRequest(
-				"/admin",
-				"POST",
-				{
-					action: "enumRouters",
-				},
-				config.apiToken,
-			);
-
-			if (result.code !== 0) {
-				await ctx.reply(`❌ Error: ${result.message}`);
-				return;
-			}
-
-			const routers = result.data?.routers || [];
-
-			if (routers.length === 0) {
-				await ctx.reply("❌ No nodes found.\n没有找到节点。");
-				return;
-			}
-
-			let message = `📡 *MoeNet Nodes 节点列表 (${routers.length})*\n${DIVIDER}\n\n`;
-			routers.forEach((r: RouterInfo) => {
-				const status = r.isOpen ? "🟢" : "🔴";
-				const capacity = r.maxPeers
-					? `${r.sessionCount || 0}/${r.maxPeers}`
-					: `${r.sessionCount || 0}/∞`;
-				const ipv4 = r.supportsIpv4 ? "✓" : "✗";
-				const ipv6 = r.supportsIpv6 ? "✓" : "✗";
-
-				message += `${status} *${escapeMarkdown(r.name)}*`;
-				if (r.location) message += ` — ${escapeMarkdown(r.location)}`;
-				if (r.provider) message += ` | ${escapeMarkdown(r.provider)}`;
-				message += `\n`;
-				message += `┃ 👥 ${capacity} peers | IPv4:${ipv4} IPv6:${ipv6}`;
-				if (!r.allowCnPeers) message += ` | 🚫CN`;
-				message += `\n`;
-				if (r.endpoint) {
-					message += `┗ 🌐 \`${r.endpoint}\`\n`;
-				} else {
-					message += `┗ 🌐 —\n`;
-				}
-				message += `\n`;
-			});
-
-			await ctx.reply(message, { parse_mode: "Markdown" });
-		} catch (error) {
-			console.error("[Nodes] Error:", error);
-			await ctx.reply("❌ Failed to fetch nodes.\n获取节点信息失败。");
-		}
-	});
+	// /nodes and node management moved to the unified /node command (nodes.ts).
 
 	// =============================================================================
 	// /health — Real-time WG + BGP Health Diagnostics
@@ -1005,6 +1051,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 	// Health overview callback: hov (health overview)
 	bot.callbackQuery(/^hov$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
+		}
 		try {
 			await renderHealthOverview(ctx, ctx.callbackQuery.message?.message_id);
 			await ctx.answerCallbackQuery();
@@ -1016,6 +1066,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 	// Health detail callback: hd:<node>
 	bot.callbackQuery(/^hd:(.+)$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
+		}
 		const node = ctx.match?.[1];
 		if (!node) return;
 		try {
@@ -1029,6 +1083,10 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 	// Health fix callback: hfix:<node>
 	bot.callbackQuery(/^hfix:(.+)$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
+		}
 		const node = ctx.match?.[1];
 		if (!node) return;
 		try {
@@ -1397,7 +1455,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 				: "❌ Not set 未选择";
 
 		const targetInfo = flow.targetCount
-			? `\nTargets 用户: 👥 ${flow.targetCount.tg + flow.targetCount.email} (📱TG ${flow.targetCount.tg} + 📧Email ${flow.targetCount.email})`
+			? `\nTargets 用户: 👥 ${flow.targetCount.total} (📱TG ${flow.targetCount.tg} + 📧Email ${flow.targetCount.email} | 🔗Both ${flow.targetCount.both})`
 			: "";
 
 		const text =
@@ -1588,7 +1646,9 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle "Done" → store selection, go to preview or back to menu
-	bot.callbackQuery(/^ann:done:(.+)$/, async (ctx) => {
+	// NOTE: restrict to bitmask (0/1 only) so "ann:done:dismiss" falls through
+	// to its dedicated handler instead of being parsed as a bitmask.
+	bot.callbackQuery(/^ann:done:([01]+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
@@ -1666,7 +1726,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	/** Fetch target user count for given routers (empty = all) */
 	async function fetchTargetCount(
 		routers: string[],
-	): Promise<{ tg: number; email: number }> {
+	): Promise<{ tg: number; email: number; both: number; total: number }> {
 		try {
 			const result = await apiRequest(
 				"/admin",
@@ -1681,17 +1741,27 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			if (result.code === 0) {
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 				const data = result.data as any;
-				const tg = ((data?.targets || []) as NotificationTarget[]).length;
-				const email = (
-					(data?.emailFallbacks || []) as Array<{ asn: number; email: string }>
+				const targets = (data?.targets || []) as AnnounceTarget[];
+				const withTg = targets.filter((t) => t.telegramId).length;
+				const withEmail = targets.filter(
+					(t) => t.emails && t.emails.length > 0,
 				).length;
-				return { tg, email };
+				const withBoth = targets.filter(
+					(t) => t.telegramId && t.emails && t.emails.length > 0,
+				).length;
+				return {
+					tg: withTg,
+					email: withEmail,
+					both: withBoth,
+					total: targets.length,
+				};
 			}
 		} catch {
 			// Non-critical, return zeros
 		}
-		return { tg: 0, email: 0 };
+		return { tg: 0, email: 0, both: 0, total: 0 };
 	}
+
 
 	// Handle "Preview & Send" from main menu
 	bot.callbackQuery("ann:preview", async (ctx) => {
@@ -1745,11 +1815,15 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const data = result.data as any;
-		const tgTargets = (data?.targets || []) as NotificationTarget[];
-		const emailTargets = (data?.emailFallbacks || []) as Array<{
-			asn: number;
-			email: string;
-		}>;
+		const targets = (data?.targets || []) as AnnounceTarget[];
+
+		const withTg = targets.filter((t) => t.telegramId).length;
+		const withEmail = targets.filter(
+			(t) => t.emails && t.emails.length > 0,
+		).length;
+		const withBoth = targets.filter(
+			(t) => t.telegramId && t.emails && t.emails.length > 0,
+		).length;
 
 		const scope =
 			routerNames.length > 0
@@ -1760,17 +1834,18 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			`📢 *Announcement Confirm 确认发送*\n\n` +
 			`${scope}\n\n` +
 			`Message 消息:\n${escapeMarkdown(message)}\n\n` +
-			`📱 Telegram: *${tgTargets.length}* users\n` +
-			`📧 Email: *${emailTargets.length}* users\n` +
-			`👥 Total 总计: *${tgTargets.length + emailTargets.length}* unique users`;
+			`📊 Target Coverage 目标覆盖:\n` +
+			`  📱 TG: *${withTg}* users\n` +
+			`  📧 Email: *${withEmail}* users\n` +
+			`  🔗 Both 双通道: *${withBoth}* users\n` +
+			`  👥 Total ASNs 总计: *${targets.length}*`;
 
-		if (tgTargets.length === 0 && emailTargets.length === 0) {
+		if (targets.length === 0) {
 			preview += `\n\n⚠️ No reachable users found.\n未找到可通知的用户。`;
 			await ctx.editMessageText(preview, { parse_mode: "Markdown" });
 			return;
 		}
 
-		// Store in session, use simple callback_data (64-byte limit)
 		const keyboard = new InlineKeyboard()
 			.text("✅ Send 发送", "ann:send")
 			.text("🚫 Cancel 取消", "ann:cancel");
@@ -1781,7 +1856,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		});
 	}
 
-	// Handle send confirm (also used by retry)
+	// Handle send confirm
 	bot.callbackQuery("ann:send", async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
@@ -1799,7 +1874,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 		await ctx.editMessageText("⏳ Sending announcement...\n正在发送公告...");
 
-		// Fetch targets
+		// Fetch unified targets from API
 		const result = await apiRequest(
 			"/admin",
 			"POST",
@@ -1817,46 +1892,45 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const data = result.data as any;
-		const tgTargets = (data?.targets || []) as NotificationTarget[];
-		const emailTargets = (data?.emailFallbacks || []) as Array<{
-			asn: number;
-			email: string;
-		}>;
+		const targets = (data?.targets || []) as AnnounceTarget[];
 		const allAsns = (data?.allAsns || []) as number[];
 
-		// Dynamic fallback: for ASNs with no contact at all, fetch from DN42 registry
-		const coveredAsns = new Set([
-			...tgTargets.map((t) => t.asn),
-			...emailTargets.map((t) => t.asn),
-		]);
-		const unreachableAsns = allAsns.filter((a) => !coveredAsns.has(a));
+		// DN42 Registry fallback: for ASNs with no email, try to fetch from registry
+		const needEmailAsns = targets.filter(
+			(t) => !t.emails || t.emails.length === 0,
+		);
 
-		if (unreachableAsns.length > 0) {
-			// Parallel fetch with 5s timeout per ASN
+		if (needEmailAsns.length > 0) {
 			const contactResults = await Promise.allSettled(
-				unreachableAsns.map(async (asn) => {
+				needEmailAsns.map(async (target) => {
 					const timeout = new Promise<never>((_, reject) =>
 						setTimeout(() => reject(new Error("timeout")), 5000),
 					);
-					const contacts = await Promise.race([fetchContacts(asn), timeout]);
+					const contacts = await Promise.race([
+						fetchContacts(target.asn),
+						timeout,
+					]);
 					const email = contacts.find(
 						(c) => c.includes("@") && !c.startsWith("@"),
 					);
-					return email ? { asn, email } : null;
+					return email ? { asn: target.asn, email } : null;
 				}),
 			);
 
-			for (const result of contactResults) {
-				if (result.status === "fulfilled" && result.value) {
-					emailTargets.push(result.value);
+			for (const r of contactResults) {
+				if (r.status === "fulfilled" && r.value) {
+					const t = targets.find((t) => t.asn === r.value!.asn);
+					if (t) {
+						t.emails.push(r.value.email);
+					}
 					// Backfill contact (non-blocking)
 					apiRequest(
 						"/admin",
 						"POST",
 						{
 							action: "updateSessionContact",
-							asn: result.value.asn,
-							contact: result.value.email,
+							asn: r.value.asn,
+							contact: r.value.email,
 						},
 						config.apiToken,
 					).catch(() => {});
@@ -1864,16 +1938,15 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			}
 		}
 
-		const sendResult = await executeSend(
+		const sendResults = await executeSend(
 			ctx,
 			flow.message || "",
-			tgTargets,
-			emailTargets,
+			targets,
 		);
-		await showSendReport(ctx, sendResult, flow);
+		await showSendReport(ctx, sendResults, flow);
 	});
 
-	// Handle retry - only re-send failed items
+	// Handle retry - only re-send failed channels
 	bot.callbackQuery("ann:retry", async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
@@ -1887,13 +1960,8 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			return;
 		}
 
-		const retryTg = (flow.failedTg || []) as NotificationTarget[];
-		const retryEmail = (flow.failedEmail || []) as Array<{
-			asn: number;
-			email: string;
-		}>;
-
-		if (retryTg.length === 0 && retryEmail.length === 0) {
+		const failedResults = flow.failedResults || [];
+		if (failedResults.length === 0) {
 			await ctx.editMessageText(
 				"✅ No failed items to retry.\n没有需要重试的项。",
 			);
@@ -1902,58 +1970,80 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 		await ctx.editMessageText("🔄 Retrying failed items...\n正在重试失败项...");
 
-		const sendResult = await executeSend(
+		// Build retry targets from failed results
+		const retryTargets: AnnounceTarget[] = failedResults.map((r) => ({
+			asn: r.asn,
+			telegramId: r.tg === "failed" ? r.telegramId : undefined,
+			emails:
+				r.email === "failed" && r.emailAddr ? [r.emailAddr] : [],
+		}));
+
+		const sendResults = await executeSend(
 			ctx,
 			flow.message || "",
-			retryTg,
-			retryEmail,
+			retryTargets,
 		);
-		await showSendReport(ctx, sendResult, flow, true);
+		await showSendReport(ctx, sendResults, flow, true);
 	});
 
 	/**
-	 * Execute the actual send: TG + Email, return categorized results.
+	 * Execute dual-channel send: TG + Email for each ASN.
+	 * Returns per-ASN delivery results.
 	 */
 	async function executeSend(
 		ctx: BotContext,
 		message: string,
-		tgTargets: NotificationTarget[],
-		emailTargets: Array<{ asn: number; email: string }>,
-	) {
+		targets: AnnounceTarget[],
+	): Promise<AsnDeliveryResult[]> {
 		const adminTgId = ctx.from?.id;
-		let tgSent = 0;
-		const failedTg: NotificationTarget[] = [];
-		const totalTg = tgTargets.filter((t) => t.telegramId !== adminTgId).length;
+		const results: AsnDeliveryResult[] = [];
+		let tgProgress = 0;
+		const totalTg = targets.filter(
+			(t) => t.telegramId && t.telegramId !== adminTgId,
+		).length;
 
-		for (const target of tgTargets) {
-			if (target.telegramId === adminTgId) continue;
-			try {
-				await ctx.api.sendMessage(
-					target.telegramId,
-					`📢 *MoeNet Announcement 公告*\n\n${escapeMarkdown(message)}`,
-					{ parse_mode: "Markdown" },
-				);
-				tgSent++;
-			} catch (error) {
-				console.error(`[Announce] TG failed AS${target.asn}:`, error);
-				failedTg.push(target);
+		// Phase 1: Send TG messages
+		for (const target of targets) {
+			const result: AsnDeliveryResult = {
+				asn: target.asn,
+				tg: "no_channel",
+				email: "no_channel",
+				telegramId: target.telegramId,
+				emailAddr: target.emails?.[0],
+			};
+
+			if (target.telegramId && target.telegramId !== adminTgId) {
+				try {
+					await ctx.api.sendMessage(
+						target.telegramId,
+						`📢 *MoeNet Announcement 公告*\n\n${escapeMarkdown(message)}`,
+						{ parse_mode: "Markdown" },
+					);
+					result.tg = "sent";
+				} catch (error) {
+					console.error(
+						`[Announce] TG failed AS${target.asn}:`,
+						error,
+					);
+					result.tg = "failed";
+				}
+				tgProgress++;
+
+				// Progress update every 10 messages
+				if (tgProgress % 10 === 0 && tgProgress < totalTg) {
+					ctx.editMessageText(
+						`⏳ Sending... 📱 TG ${tgProgress}/${totalTg}\n正在发送...`,
+					).catch(() => {});
+				}
 			}
 
-			// Progress update every 10 messages
-			if (
-				(tgSent + failedTg.length) % 10 === 0 &&
-				tgSent + failedTg.length < totalTg
-			) {
-				ctx
-					.editMessageText(
-						`⏳ Sending... 📱 TG ${tgSent + failedTg.length}/${totalTg}\n正在发送...`,
-					)
-					.catch(() => {}); // Non-blocking, ignore edit errors
-			}
+			results.push(result);
 		}
 
-		let emailSent = 0;
-		const failedEmail: Array<{ asn: number; email: string }> = [];
+		// Phase 2: Send emails in bulk
+		const emailTargets = targets
+			.filter((t) => t.emails && t.emails.length > 0)
+			.map((t) => ({ asn: t.asn, email: t.emails[0]! }));
 
 		if (emailTargets.length > 0) {
 			const emailResult = await apiRequest(
@@ -1969,93 +2059,106 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			const emailData = emailResult.data as any;
-			emailSent = emailData?.sent || 0;
-			const emailErrors = (emailData?.errors || []) as Array<{
-				asn: number;
-				error: string;
-			}>;
-
-			// Match failed ASNs back to email targets
 			const failedAsnSet = new Set(
-				emailErrors.map((e: { asn: number }) => e.asn),
+				((emailData?.errors || []) as Array<{ asn: number }>).map(
+					(e) => e.asn,
+				),
 			);
-			for (const t of emailTargets) {
-				if (failedAsnSet.has(t.asn)) {
-					failedEmail.push(t);
+
+			for (const r of results) {
+				if (emailTargets.some((e) => e.asn === r.asn)) {
+					r.email = failedAsnSet.has(r.asn) ? "failed" : "sent";
 				}
 			}
 		}
 
-		return { tgSent, emailSent, failedTg, failedEmail };
+		return results;
 	}
 
 	/**
-	 * Show categorized send report with retry button if there are failures.
+	 * Show per-user delivery report with dual-channel reach status.
 	 */
 	async function showSendReport(
 		ctx: BotContext,
-		result: {
-			tgSent: number;
-			emailSent: number;
-			failedTg: NotificationTarget[];
-			failedEmail: Array<{ asn: number; email: string }>;
-		},
+		results: AsnDeliveryResult[],
 		flow: NonNullable<BotContext["session"]["announceFlow"]>,
 		isRetry = false,
 	) {
-		const { tgSent, emailSent, failedTg, failedEmail } = result;
-		const totalFailed = failedTg.length + failedEmail.length;
 		const prefix = isRetry
 			? "🔄 *Retry Report 重试报告*"
 			: "📢 *Announcement Report 公告报告*";
 
+		// Categorize by user reach status
+		const bothOk = results.filter(
+			(r) => r.tg === "sent" && r.email === "sent",
+		);
+		const tgOnly = results.filter(
+			(r) => r.tg === "sent" && r.email !== "sent",
+		);
+		const emailOnly = results.filter(
+			(r) => r.email === "sent" && r.tg !== "sent",
+		);
+		const unreachable = results.filter(
+			(r) => r.tg !== "sent" && r.email !== "sent",
+		);
+		const reached = results.length - unreachable.length;
+		const reachPct =
+			results.length > 0
+				? Math.round((reached / results.length) * 100)
+				: 0;
+
+		const tgSent = results.filter((r) => r.tg === "sent").length;
+		const tgFailed = results.filter((r) => r.tg === "failed").length;
+		const emailSent = results.filter((r) => r.email === "sent").length;
+		const emailFailed = results.filter((r) => r.email === "failed").length;
+
 		let report =
 			`${prefix}\n\n` +
-			`📱 TG: ✅ ${tgSent} sent, ❌ ${failedTg.length} failed\n` +
-			`📧 Email: ✅ ${emailSent} sent, ❌ ${failedEmail.length} failed\n` +
-			`👥 Total reached 总到达: *${tgSent + emailSent}*`;
+			`📊 User Reach 用户到达:\n` +
+			`  ✅ Both 双通道: ${bothOk.length}\n` +
+			`  ⚠️ TG only 仅TG: ${tgOnly.length}\n` +
+			`  ⚠️ Email only 仅邮件: ${emailOnly.length}\n` +
+			`  ❌ Unreachable 未到达: ${unreachable.length}\n` +
+			`  👥 Reach rate 到达率: *${reached}/${results.length}* (${reachPct}%)\n\n` +
+			`📱 TG: ✅ ${tgSent} sent, ❌ ${tgFailed} failed\n` +
+			`📧 Email: ✅ ${emailSent} sent, ❌ ${emailFailed} failed`;
 
-		// Categorized failure details
-		if (totalFailed > 0) {
-			// Find ASNs that failed on BOTH channels
-			const tgFailedAsns = new Set(failedTg.map((t) => t.asn));
-			const emailFailedAsns = new Set(failedEmail.map((t) => t.asn));
-			const bothFailed = [...tgFailedAsns].filter((a) =>
-				emailFailedAsns.has(a),
-			);
-			const tgOnlyFailed = failedTg.filter((t) => !emailFailedAsns.has(t.asn));
-			const emailOnlyFailed = failedEmail.filter(
-				(t) => !tgFailedAsns.has(t.asn),
-			);
-
-			report += `\n\n*Failures 失败详情:*`;
-
-			if (bothFailed.length > 0) {
-				report += `\n🔴 Both TG+Email 双通道失败:`;
-				for (const asn of bothFailed) {
-					report += `\n  • AS${asn}`;
-				}
+		// Show unreachable details (up to 20)
+		if (unreachable.length > 0) {
+			report += `\n\n*❌ Unreachable 未到达:*`;
+			for (const r of unreachable.slice(0, 20)) {
+				const tgInfo =
+					r.tg === "failed"
+						? "📱❌"
+						: r.tg === "no_channel"
+							? "📱—"
+							: "";
+				const emailInfo =
+					r.email === "failed"
+						? "📧❌"
+						: r.email === "no_channel"
+							? "📧—"
+							: "";
+				report += `\n  • AS${r.asn} ${tgInfo} ${emailInfo}`;
 			}
-			if (tgOnlyFailed.length > 0) {
-				report += `\n📱 TG only TG失败:`;
-				for (const t of tgOnlyFailed) {
-					report += `\n  • AS${t.asn} (id: ${t.telegramId})`;
-				}
-			}
-			if (emailOnlyFailed.length > 0) {
-				report += `\n📧 Email only 邮件失败:`;
-				for (const t of emailOnlyFailed) {
-					report += `\n  • AS${t.asn} (${t.email})`;
-				}
+			if (unreachable.length > 20) {
+				report += `\n  ...+${unreachable.length - 20} more`;
 			}
 		}
 
-		// Store failures in session for retry
-		if (totalFailed > 0) {
-			ctx.session.announceFlow = { ...flow, failedTg, failedEmail };
+		// Store failed results for retry (only items where at least one channel failed)
+		const retryable = results.filter(
+			(r) => r.tg === "failed" || r.email === "failed",
+		);
+
+		if (retryable.length > 0) {
+			ctx.session.announceFlow = { ...flow, failedResults: retryable };
 
 			const keyboard = new InlineKeyboard()
-				.text(`🔄 Retry ${totalFailed} failed 重试失败项`, "ann:retry")
+				.text(
+					`🔄 Retry ${retryable.length} failed 重试失败项`,
+					"ann:retry",
+				)
 				.text("✅ Done 完成", "ann:done:dismiss");
 
 			await ctx.editMessageText(report, {
@@ -2063,7 +2166,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 				reply_markup: keyboard,
 			});
 		} else {
-			// All succeeded - clean up
+			// All succeeded — clean up
 			ctx.session.announceFlow = undefined;
 			await ctx.editMessageText(report, { parse_mode: "Markdown" });
 		}
@@ -2077,7 +2180,6 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		const text = ctx.callbackQuery.message?.text || "Done";
 		await ctx.editMessageText(text);
 	});
-
 	// Handle cancel
 	bot.callbackQuery("ann:cancel", async (ctx) => {
 		await ctx.answerCallbackQuery("Cancelled");
@@ -2429,6 +2531,137 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 }
 
 /**
+ * Reject a pending session with an optional reason, then refresh the list.
+ * The reason is stored on the session (lastError) so the peer can see it.
+ */
+/** Notify the peer owner (Telegram + email) that their request was rejected.
+ *  Returns a short " · notified …" suffix for the admin confirmation line. */
+async function notifyRejection(
+	ctx: BotContext,
+	asn: number,
+	node: string,
+	reason: string,
+): Promise<string> {
+	const hasReason = reason && reason !== "Rejected by admin";
+	try {
+		const tr = await apiRequest(
+			"/admin",
+			"POST",
+			{ action: "getNotificationTargets", asns: [asn] },
+			config.apiToken,
+		);
+		const targets = (tr.data as { targets?: AnnounceTarget[] })?.targets || [];
+		const t = targets.find((x) => x.asn === asn);
+
+		let tg = false;
+		let email = false;
+
+		if (t?.telegramId) {
+			const msg =
+				`❌ *Peer Request Rejected*\nPeer 申请被拒绝\n\n` +
+				`🆔 AS${asn}${node ? ` @ \`${node}\`` : ""}\n` +
+				(hasReason ? `📝 Reason 原因: ${reason}\n` : "") +
+				`\nQuestions? Contact ${config.telegramContact}.\n如有疑问请联系 ${config.telegramContact}。`;
+			try {
+				await ctx.api.sendMessage(t.telegramId, msg, { parse_mode: "Markdown" });
+				tg = true;
+			} catch (e) {
+				console.error(`[RejectNotify] TG failed AS${asn}:`, e);
+			}
+		}
+		if (t?.emails?.length) {
+			const body =
+				`Your DN42 peer request (AS${asn}${node ? ` @ ${node}` : ""}) was rejected.` +
+				(hasReason ? `\n\nReason: ${reason}` : "") +
+				`\n\nQuestions? Contact ${config.telegramContact}.`;
+			try {
+				const er = await apiRequest(
+					"/admin",
+					"POST",
+					{
+						action: "sendEmail",
+						subject: "[MoeNet DN42] Peer request rejected",
+						message: body,
+						targets: t.emails.map((e) => ({ asn, email: e })),
+					},
+					config.apiToken,
+				);
+				email = er.code === 0;
+			} catch (e) {
+				console.error(`[RejectNotify] email failed AS${asn}:`, e);
+			}
+		}
+
+		if (tg && email) return " · notified TG+email 已通知";
+		if (tg) return " · notified TG 已通知";
+		if (email) return " · notified email 已邮件通知";
+		return " · ⚠️ no channel to notify 无法通知用户";
+	} catch (e) {
+		console.error("[RejectNotify] error:", e);
+		return "";
+	}
+}
+
+/**
+ * Reject a pending session with an optional reason, then refresh the list.
+ * The reason is stored on the session (lastError) so the peer can see it, and
+ * the peer owner is notified via Telegram + email.
+ */
+async function submitReject(
+	ctx: BotContext,
+	uuid: string,
+	reason: string,
+): Promise<void> {
+	ctx.session.rejectReason = undefined;
+	try {
+		// Resolve ASN/node before rejecting (for the peer notification).
+		let asn = 0;
+		let node = "";
+		try {
+			const g = await apiRequest(
+				"/admin",
+				"POST",
+				{ action: "getSession", uuid },
+				config.apiToken,
+			);
+			const s = (
+				g.data as {
+					session?: { asn: number; routerName?: string; router: string };
+				}
+			)?.session;
+			if (s) {
+				asn = Number(s.asn);
+				node = s.routerName || s.router;
+			}
+		} catch {
+			/* best-effort */
+		}
+
+		const result = await apiRequest(
+			"/admin",
+			"POST",
+			{ action: "rejectSession", uuid, reason },
+			config.apiToken,
+		);
+		if (result.code !== 0) {
+			await ctx.reply(`❌ ${result.message}`);
+			return;
+		}
+
+		const delivered = asn ? await notifyRejection(ctx, asn, node, reason) : "";
+		await ctx.reply(
+			`✅ Rejected 已拒绝` +
+				(reason && reason !== "Rejected by admin" ? ` — ${reason}` : "") +
+				delivered,
+		);
+		await showPendingList(ctx);
+	} catch (error) {
+		console.error("[Reject] Error:", error);
+		await ctx.reply("❌ Failed to reject.\n拒绝失败。");
+	}
+}
+
+/**
  * Show pending sessions list with inline buttons
  */
 async function showPendingList(ctx: BotContext, editMessageId?: number) {
@@ -2545,6 +2778,22 @@ interface RouterInfo {
 interface NotificationTarget {
 	asn: number;
 	telegramId: number;
+}
+
+/** Unified per-ASN target from getNotificationTargets API */
+interface AnnounceTarget {
+	asn: number;
+	telegramId?: number;
+	emails: string[];
+}
+
+/** Per-ASN delivery result for dual-channel send */
+interface AsnDeliveryResult {
+	asn: number;
+	tg: "sent" | "failed" | "no_channel";
+	email: "sent" | "failed" | "no_channel";
+	telegramId?: number;
+	emailAddr?: string;
 }
 
 /**

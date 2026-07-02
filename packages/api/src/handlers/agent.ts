@@ -7,13 +7,18 @@ import { getModels } from "../db/dbContext";
 import {
 	type BgpSessionAttributes,
 	PeeringStatus,
+	SessionPolicy,
 } from "../db/models/bgpSessions";
 import { getRedis } from "../db/redisContext";
+import { isChinaIP } from "../providers/chinaIp";
 import {
 	computeLoopbackIPv4,
 	computeLoopbackIPv6,
 	deriveLLAFromLoopback,
+	getContinentFromRegionCode,
 } from "../services/ipAllocator";
+import { notifyAdmin } from "../services/telegramNotify";
+import { canTransition } from "../services/workflowEngine";
 
 /**
  * Map regionCode to continent and subregion LC constants
@@ -300,7 +305,10 @@ async function handleSessions(c: Context, router: string): Promise<Response> {
 			data: typeof s.data === "string" ? JSON.parse(s.data) : s.data || null,
 			mtu: s.mtu,
 			port,
-			policy: s.policy,
+			// Agent's BgpSession.Policy is a string; sending the raw enum number
+			// triggers a json unmarshal type error on the agent (tolerated, since
+			// the bird templates don't use the value). Send the policy name.
+			policy: (SessionPolicy[s.policy as number] ?? "FULL").toLowerCase(),
 			lastError: s.lastError,
 		};
 	});
@@ -316,7 +324,15 @@ async function handleModify(c: Context, router: string): Promise<Response> {
 	const body = await c.req.json();
 	// Accept both 'uuid' and 'peer_id' — agent sends 'peer_id'
 	const uuid = body.uuid || body.peer_id;
-	const { lastError } = body;
+	const { lastError, observedEndpoint } = body;
+
+	// NAT peers connect without a declared endpoint, so their origin can't be
+	// vetted at approval time. The agent reports the source IP it learns from the
+	// handshake; enforce CN/region policy on it here. This report carries no
+	// status, so it must branch before the status-required guard below.
+	if (observedEndpoint && body.status === undefined) {
+		return await handleObservedEndpoint(c, router, uuid, observedEndpoint);
+	}
 
 	// Map string status to PeeringStatus enum if needed
 	let status = body.status;
@@ -366,9 +382,35 @@ async function handleModify(c: Context, router: string): Promise<Response> {
 		return success(c, { deleted: true });
 	}
 
+	// Validate the state transition — the agent should only drive valid status
+	// changes. A compromised or buggy agent must not force e.g. REJECTED→ENABLED.
+	// Same-status reports (e.g. re-reporting ENABLED after an agent restart) are
+	// allowed as no-ops.
+	const existing = await models.bgpSessions.findOne({
+		where: { uuid, router },
+		attributes: ["status"],
+	});
+	if (!existing) {
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Session not found",
+		);
+	}
+	const currentStatus = existing.get("status") as PeeringStatus;
+	const newStatus = status as PeeringStatus;
+	if (currentStatus !== newStatus && !canTransition(currentStatus, newStatus)) {
+		console.warn(
+			`[handleModify] Rejected invalid transition for ${uuid} from agent ${router}: ${PeeringStatus[currentStatus]} → ${PeeringStatus[newStatus]}`,
+		);
+		// Ack without applying so the agent doesn't retry-storm on a rejected change.
+		return success(c, { updated: false, reason: "invalid transition" });
+	}
+
 	const [updated] = await models.bgpSessions.update(
 		{
-			status: status as PeeringStatus,
+			status: newStatus,
 			lastError: lastError || null,
 		},
 		{ where: { uuid, router } },
@@ -381,6 +423,94 @@ async function handleModify(c: Context, router: string): Promise<Response> {
 			undefined,
 			"Session not found",
 		);
+	}
+
+	return success(c, { updated: true });
+}
+
+/**
+ * Enforce CN policy on a NAT peer's learned source IP.
+ *
+ * NAT peers have no declared endpoint to vet when the request is approved. The
+ * agent reports the source IP the kernel learns from the WireGuard handshake;
+ * we persist it and, if it violates the node's policy (a CN IP on a node that
+ * rejects CN peers), auto-disable the session and alert the admin. Region
+ * enforcement beyond CN would require a full geoip dataset we don't ship yet.
+ */
+async function handleObservedEndpoint(
+	c: Context,
+	router: string,
+	uuid: string,
+	ip: string,
+): Promise<Response> {
+	if (!uuid) {
+		return makeResponse(
+			c,
+			ResponseCode.VALIDATION_ERROR,
+			undefined,
+			"Missing uuid",
+		);
+	}
+
+	const models = getModels();
+	const session = await models.bgpSessions.findOne({
+		where: { uuid, router },
+		attributes: ["status", "asn", "observedEndpoint"],
+	});
+	if (!session) {
+		return makeResponse(
+			c,
+			ResponseCode.NOT_FOUND,
+			undefined,
+			"Session not found",
+		);
+	}
+
+	// Persist the observed IP (skip the write if unchanged).
+	const prev = session.get("observedEndpoint") as string | null;
+	if (prev !== ip) {
+		await models.bgpSessions.update(
+			{ observedEndpoint: ip },
+			{ where: { uuid, router } },
+		);
+	}
+
+	// Load the node's CN policy.
+	const routerRow = await models.routers.findOne({
+		where: { uuid: router },
+		attributes: ["name", "allowCnPeers"],
+	});
+	const allowCn =
+		(routerRow?.get("allowCnPeers") as boolean | undefined) ?? true;
+	const nodeName = (routerRow?.get("name") as string | undefined) ?? router;
+	const asn = session.get("asn") as number;
+
+	// Violation: CN source IP on a node that does not accept CN peers.
+	if (isChinaIP(ip) && !allowCn) {
+		const currentStatus = session.get("status") as PeeringStatus;
+		// Only act on a live session, and only via a valid transition.
+		if (
+			currentStatus === PeeringStatus.ENABLED &&
+			canTransition(PeeringStatus.ENABLED, PeeringStatus.DISABLED)
+		) {
+			await models.bgpSessions.update(
+				{
+					status: PeeringStatus.DISABLED,
+					lastError: `Auto-disabled: NAT peer connected from CN IP ${ip}; node ${nodeName} does not accept CN peers`,
+				},
+				{ where: { uuid, router } },
+			);
+			console.warn(
+				`[handleObservedEndpoint] Auto-disabled AS${asn} on ${nodeName}: CN source IP ${ip}`,
+			);
+			await notifyAdmin(
+				`🚫 *Peer auto-disabled* — \`AS${asn}\`\n` +
+					`📍 Node: \`${nodeName}\`\n` +
+					`🇨🇳 NAT peer connected from CN IP \`${ip}\`, but this node does not accept CN peers.\n` +
+					`Session was disabled automatically.`,
+			);
+			return success(c, { updated: true, disabled: true, reason: "cn_policy" });
+		}
 	}
 
 	return success(c, { updated: true });
@@ -662,7 +792,11 @@ async function handleConfig(
 	routerRecord: any,
 ): Promise<Response> {
 	const name = routerRecord.get("name") as string;
-	const region = routerRecord.get("region") as string;
+	// routers has no `region` column (only regionCode/location), so the old
+	// get("region") was always undefined. Derive a continent label from regionCode.
+	const region = getContinentFromRegionCode(
+		(routerRecord.get("regionCode") as number) ?? 0,
+	);
 	const location = routerRecord.get("location") as string;
 
 	// Build agent configuration
@@ -709,7 +843,10 @@ async function handleConfig(
 			pingWorkers: 32,
 		},
 		autoUpdate: {
-			enabled: true,
+			// On by default (auto-update is the agent distribution mechanism);
+			// set AGENT_AUTOUPDATE=false on the CP to disable it fleet-wide so
+			// custom/local agent binaries aren't reverted (bug-list #10).
+			enabled: process.env.AGENT_AUTOUPDATE !== "false",
 			checkInterval: 60,
 			channel: "stable",
 			githubRepo: "heichaowo/moenet-agent",
@@ -891,7 +1028,10 @@ async function handleBirdConfig(
 			bandwidthCommunity: getBandwidthCommunity(bandwidth),
 		},
 		policy: {
-			dn42As: policyData.dn42As,
+			// dn42As is a BIGINT column (number in JS), but the agent's BirdPolicy
+			// struct declares dn42As as a string (it's only interpolated into BIRD
+			// templates). Send it as a string so JSON decoding on the agent succeeds.
+			dn42As: String(policyData.dn42As),
 			dn42Ipv4Prefix: policyData.dn42Ipv4Prefix,
 			dn42Ipv6Prefix: policyData.dn42Ipv6Prefix,
 			rpkiServers: policyData.rpkiServers,

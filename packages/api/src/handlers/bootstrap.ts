@@ -276,6 +276,22 @@ BIRD_CONF_EOF
 # Create empty include files to prevent BIRD errors
 touch /etc/bird/peers/.keep
 touch /etc/bird/ibgp.d/.keep
+
+# The agent-rendered bird.conf includes maintenance.conf and blacklist.conf as
+# specific (non-glob) files. The agent renders filters/communities/babel/
+# cold_potato itself, but NOT these two — so without them the agent's first
+# 'birdc configure' fails, BIRD falls back to minimal config, and no peers load.
+# Create stubs here (the agent overwrites blacklist.conf when ASNs are blocked).
+cat > /etc/bird/maintenance.conf << 'MAINT_EOF'
+define MAINTENANCE_MODE = false;
+MAINT_EOF
+cat > /etc/bird/blacklist.conf << 'BLACKLIST_EOF'
+# Blacklist stub - replaced by moenet-agent when ASNs are blocked
+function is_blacklisted() -> bool {
+    return false;
+}
+BLACKLIST_EOF
+
 chown -R root:root /etc/bird
 
 # Download Agent
@@ -346,6 +362,13 @@ echo "  journalctl -u bird -f"
 echo "  journalctl -u moenet-agent -f"
 echo ""
 `;
+
+	// One-time use: invalidate the bootstrap token now that the script (which
+	// embeds the global agent API key) has been served. A leaked bootstrap URL
+	// would otherwise keep handing out the key. Re-bootstrapping requires the
+	// admin to issue a fresh token.
+	await router.update({ bootstrapToken: null });
+	console.log(`[Bootstrap] Consumed bootstrap token for node ${name}`);
 
 	return c.text(script, 200, {
 		"Content-Type": "text/x-shellscript",

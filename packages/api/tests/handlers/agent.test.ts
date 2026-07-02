@@ -125,6 +125,12 @@ describe('Agent Handler', () => {
         const app = new Hono();
         app.post('/agent/:router/:action', agentHandler);
 
+        // handleModify now verifies the session exists (state-machine guard).
+        // Return an ENABLED session so the same-status modify is accepted.
+        mockBgpSessions.findOne.mockResolvedValueOnce({
+            get: (k: string) => (k === 'status' ? 2 : undefined),
+        } as never);
+
         const res = await app.request('/agent/test-router/modify', {
             method: 'POST',
             headers: {

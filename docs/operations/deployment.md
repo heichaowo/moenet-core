@@ -17,6 +17,27 @@ vim .env  # Configure all required values
 docker compose up -d
 ```
 
+## First Run & Database Initialization
+
+A fresh deployment works out of the box — no manual SQL is required:
+
+- **Schema migrations** in the `migrations/` directory run automatically on API
+  startup (serialized with a Postgres advisory lock, and tracked in the
+  `settings` table so each runs once). The directory is copied into the API
+  image, so this also works in containers.
+- **A default BIRD policy is auto-seeded** on first start. Without it the agent
+  would get `No default BIRD policy configured` and BIRD would never come up.
+  The seed uses sane defaults: the DN42 ASN, the DN42 address prefixes, two
+  standard RPKI sources (`rpki.akae.re`, `rpki.dn42.launchpadx.top`), and the
+  standard community/limit set. An existing policy row is never overwritten.
+
+::: warning Deploying with your own ASN
+The seeded defaults use MoeNet's ASN (`4242420998`) and prefixes. If you run
+your own DN42 network, update the default `bird_policies` row (ASN, prefixes,
+RPKI servers) after first start — the agents render their BIRD config (eBGP/iBGP
+`local as`, RPKI protocols) from this policy, so no source changes are needed.
+:::
+
 ## Services
 
 | Service | Port | Description |

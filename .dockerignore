@@ -1,0 +1,18 @@
+# Keep secrets, VCS, and local build artifacts out of the Docker build context
+# (they could otherwise be baked into image layer caches and inflate builds).
+.git
+.gitignore
+**/node_modules
+.env
+.env.*
+!.env.example
+*.log
+**/dist
+**/.DS_Store
+.github
+docs
+docs-legacy
+_reference
+_bmad
+_bmad-output
+.agent

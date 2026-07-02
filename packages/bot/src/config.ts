@@ -17,8 +17,6 @@ export default {
     // Agent settings
     agentPort: Number(process.env.AGENT_PORT) || 24368,
     agentToken: process.env.AGENT_TOKEN || '',
-    agentHosts: JSON.parse(process.env.AGENT_HOSTS || '{}') as Record<string, string>,
-    nodeNames: JSON.parse(process.env.NODE_NAMES || '{}') as Record<string, string>,
 
     // Webhook settings
     webhookDomain: process.env.WEBHOOK_DOMAIN || '',
@@ -39,4 +37,9 @@ export default {
 
     // Contact info
     telegramContact: process.env.TELEGRAM_CONTACT || '@heicha',
+
+    // Peering: when false (default), ALL non-admin peer requests go to manual
+    // review. Set PEER_AUTO_APPROVE=true to enable lenient auto-approve (all-green
+    // requests skip review; hard blockers still escalate).
+    peerAutoApprove: process.env.PEER_AUTO_APPROVE === 'true',
 };

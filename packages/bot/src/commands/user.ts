@@ -449,9 +449,15 @@ export function registerUserCommands(bot: Bot<BotContext>) {
             challengeStore.delete(userId);
             if (ctx.session.awaitingAsn) { ctx.session.awaitingAsn = false; hadFlow = true; }
         }
+        // Peer create/modify/remove flow + node admin flows
+        if (ctx.session.peerFlow) { ctx.session.peerFlow = undefined; hadFlow = true; }
+        if (ctx.session.modifyInput) { ctx.session.modifyInput = undefined; hadFlow = true; }
+        if (ctx.session.nodeWizard) { ctx.session.nodeWizard = undefined; hadFlow = true; }
+        if (ctx.session.nodeEdit) { ctx.session.nodeEdit = undefined; hadFlow = true; }
         // Clean up admin flows
         if (ctx.session.announceFlow) { ctx.session.announceFlow = undefined; hadFlow = true; }
         if (ctx.session.notifyFlow) { ctx.session.notifyFlow = undefined; hadFlow = true; }
+        if (ctx.session.migrateFlow) { ctx.session.migrateFlow = undefined; hadFlow = true; }
         if (ctx.session.awaitingInfoAsn) { ctx.session.awaitingInfoAsn = false; hadFlow = true; }
 
         await ctx.reply(

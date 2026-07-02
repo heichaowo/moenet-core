@@ -1,6 +1,10 @@
 import type { Context } from "hono";
 import { verify } from "hono/jwt";
-import { generateUUID, getInterfaceName } from "../common/helpers";
+import {
+	generateUUID,
+	getInterfaceName,
+	getListenPort,
+} from "../common/helpers";
 import { makeResponse, ResponseCode, success } from "../common/response";
 import config from "../config";
 import { getModels } from "../db/dbContext";
@@ -73,17 +77,6 @@ export default async function peeringHandler(c: Context): Promise<Response> {
 				"Invalid action",
 			);
 	}
-}
-
-interface CreateSessionRequest {
-	router: string;
-	endpoint?: string;
-	publicKey?: string;
-	ipv4?: string;
-	ipv6?: string;
-	ipv6LinkLocal?: string;
-	mtu?: number;
-	extensions?: string[];
 }
 
 /**
@@ -223,22 +216,16 @@ async function listSessions(c: Context, user: JWTPayload): Promise<Response> {
 			const raw = s.get() as Record<string, unknown>;
 			const routerInfo = routerMap.get(raw.router as string);
 
-			// Extract listen_port from credential JSON
-			let listenPort: number | null = null;
-			if (raw.credential && typeof raw.credential === "string") {
-				try {
-					const cred = JSON.parse(raw.credential);
-					if (cred.listen_port) listenPort = cred.listen_port;
-				} catch {
-					/* ignore parse errors */
-				}
-			}
+			// listen_port is deterministic from ASN (credential is a JSONB column, so
+			// Sequelize returns an object — the old `typeof === "string"` guard always
+			// failed and serverEndpoint was never resolved).
+			const listenPort = getListenPort(raw.asn as number);
 
 			// Build server endpoint
 			let serverEndpoint: string | null = null;
-			if (routerInfo?.publicIp && listenPort) {
+			if (routerInfo?.publicIp) {
 				serverEndpoint = `${routerInfo.publicIp}:${listenPort}`;
-			} else if (routerInfo?.publicIpv6 && listenPort) {
+			} else if (routerInfo?.publicIpv6) {
 				serverEndpoint = `[${routerInfo.publicIpv6}]:${listenPort}`;
 			}
 
