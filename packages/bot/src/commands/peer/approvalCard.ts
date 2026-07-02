@@ -9,7 +9,7 @@
  */
 
 import { lookupWhois, getWhoisAttr } from "../../services/dn42Registry";
-import { validateIpOwnership } from "../../services/dn42Validator";
+import { validateIpOwnership, isLinkLocal } from "../../services/dn42Validator";
 import { isChinaIP, resolveEndpoint } from "../../providers/chinaIp";
 
 export interface ApprovalCardInput {
@@ -156,16 +156,22 @@ export async function evaluatePeerRequest(
 async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 	const { asn } = input;
 
+	// Only ULA/GUA addresses are registry-verifiable. Link-local (fe80::) can't
+	// be — it's not in anyone's registry pool — and it's the normal case for the
+	// recommended MP-BGP+ENH+LLA method, so we don't check (or flag) it.
+	const checkPeer = !!input.ipv6 && !isLinkLocal(input.ipv6);
+	const checkLocal = !!input.localIpv6 && !isLinkLocal(input.localIpv6);
+
 	const [whois, peerOwn, localOwn, endpointIp] = await Promise.all([
 		withTimeout(lookupWhois(`AS${asn}`), 5000, null),
-		input.ipv6
-			? withTimeout(validateIpOwnership(asn, input.ipv6), 5000, {
+		checkPeer
+			? withTimeout(validateIpOwnership(asn, input.ipv6 as string), 5000, {
 					valid: false,
 					warning: "timeout",
 				})
 			: Promise.resolve(null),
-		input.localIpv6
-			? withTimeout(validateIpOwnership(asn, input.localIpv6), 5000, {
+		checkLocal
+			? withTimeout(validateIpOwnership(asn, input.localIpv6 as string), 5000, {
 					valid: false,
 					warning: "timeout",
 				})
@@ -190,15 +196,22 @@ async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 		lines.push(`📖 Registry: ⚠️ AS${asn} not found in DN42 registry`);
 	}
 
-	// IP ownership (peer + our-side, both must be in their pool)
-	const ownOk =
-		(!peerOwn || peerOwn.valid) && (!localOwn || localOwn.valid);
-	const ownBits: string[] = [];
-	if (peerOwn) ownBits.push(`peer ${peerOwn.valid ? "✅" : "⚠️"}`);
-	if (localOwn) ownBits.push(`local ${localOwn.valid ? "✅" : "⚠️"}`);
-	lines.push(
-		`🔑 IP ownership: ${ownOk ? "✅" : "⚠️"} ${ownBits.join(" · ") || "n/a"}`,
-	);
+	// Show the actual addresses so the admin can eyeball them. Link-local shows
+	// no ownership verdict (can't be checked); ULA/GUA shows in-pool / NOT-in-pool.
+	if (input.ipv6) {
+		lines.push(
+			checkPeer
+				? `🌐 Peer IPv6: ${code(input.ipv6)} — ${peerOwn?.valid ? "✅ in AS pool" : "⚠️ NOT in AS pool"}`
+				: `🌐 Peer IPv6: ${code(input.ipv6)} _(link-local — ownership n/a)_`,
+		);
+	}
+	if (input.localIpv6) {
+		lines.push(
+			checkLocal
+				? `🌐 Local IPv6: ${code(input.localIpv6)} — ${localOwn?.valid ? "✅ in AS pool" : "⚠️ NOT in AS pool"}`
+				: `🌐 Local IPv6: ${code(input.localIpv6)} _(link-local)_`,
+		);
+	}
 
 	// Endpoint + sanity + CN + region
 	const epIssue = input.endpoint
@@ -244,8 +257,12 @@ async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 	// registry pool. A missing check (no ipv6) or a failed/timed-out one counts
 	// as unverified — we do not auto-approve on faith.
 	const reasons: string[] = [];
-	if (!peerOwn || !peerOwn.valid) {
-		reasons.push("peer IPv6 ownership unverified");
+	// Only ULA/GUA can be verified; a link-local peer IPv6 is never a blocker.
+	if (checkPeer && (!peerOwn || !peerOwn.valid)) {
+		reasons.push("peer ULA/GUA IPv6 not in AS pool");
+	}
+	if (checkLocal && (!localOwn || !localOwn.valid)) {
+		reasons.push("local ULA/GUA IPv6 not in AS pool");
 	}
 	// Hard blocker 2: an obviously bogus endpoint (placeholder like google.com /
 	// 1.2.3.4, a reserved/private IP, or one that doesn't resolve). These can't be
