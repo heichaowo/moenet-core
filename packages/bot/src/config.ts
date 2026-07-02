@@ -17,7 +17,6 @@ export default {
     // Agent settings
     agentPort: Number(process.env.AGENT_PORT) || 24368,
     agentToken: process.env.AGENT_TOKEN || '',
-    agentHosts: JSON.parse(process.env.AGENT_HOSTS || '{}') as Record<string, string>,
 
     // Webhook settings
     webhookDomain: process.env.WEBHOOK_DOMAIN || '',
