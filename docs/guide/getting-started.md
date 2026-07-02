@@ -64,21 +64,20 @@ Check that your WireGuard tunnel is up and BGP session is established.
 
 ### Bootstrap Mode (Recommended)
 
-1. **Add node** via Telegram Bot (admin only):
-   ```
-   /addnode
-   ```
-   Follow the wizard to register node name, location, and public IP.
+1. **Add a node** via the Telegram bot (admin only): send `/node`, then tap
+   **➕ Add Node** and follow the wizard (name, location, public IP, region…).
 
-2. **Generate bootstrap script**:
-   ```
-   /bootstrap <node-name>
-   ```
+2. **Get the bootstrap command**: on the new node's detail card (`/node` → tap
+   the node), tap **🔑 Bootstrap** to reveal (or refresh) its install command.
 
-3. **Run on your server**:
+3. **Run it on your server**:
    ```bash
    curl -fsSL "https://api.moenet.work/bootstrap/YOUR_TOKEN" | bash
    ```
+
+> Node management (add / edit / delete / bootstrap / maintenance) all lives under
+> `/node` now; the old `/addnode`, `/bootstrap`, `/delnode` commands were merged
+> into it.
 
 The bootstrap script:
 - Downloads the latest `moenet-agent` binary
