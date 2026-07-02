@@ -39,4 +39,9 @@ export default {
 
     // Contact info
     telegramContact: process.env.TELEGRAM_CONTACT || '@heicha',
+
+    // Peering: when false (default), ALL non-admin peer requests go to manual
+    // review. Set PEER_AUTO_APPROVE=true to enable lenient auto-approve (all-green
+    // requests skip review; hard blockers still escalate).
+    peerAutoApprove: process.env.PEER_AUTO_APPROVE === 'true',
 };
