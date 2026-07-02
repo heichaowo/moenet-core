@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🤖
     title: Telegram Bot
-    details: Full peering lifecycle via @moenet_dn42_bot — login, create peers, check status, network tools.
+    details: Full peering lifecycle via @moenetdn42bot — login, create peers, check status, network tools.
   - icon: 🔗
     title: Automated BGP
     details: WireGuard tunnels and BIRD 3.x configuration managed automatically by distributed agents.
