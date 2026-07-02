@@ -41,6 +41,51 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 	]);
 }
 
+/** IPv4/IPv6 ranges that can never be a valid public WireGuard endpoint. */
+function isReservedIp(ip: string): boolean {
+	if (ip.includes(":")) {
+		const s = ip.toLowerCase();
+		if (s === "::1" || s === "::") return true;
+		if (/^fe[89ab]/.test(s)) return true; // fe80::/10 link-local
+		if (/^f[cd]/.test(s)) return true; // fc00::/7 ULA
+		if (s.startsWith("2001:db8")) return true; // documentation
+		if (s.startsWith("ff")) return true; // multicast
+		return false;
+	}
+	const o = ip.split(".").map(Number);
+	if (o.length !== 4 || o.some((n) => Number.isNaN(n))) return false;
+	const [a, b, c] = o as [number, number, number, number];
+	if (a === 0 || a === 10 || a === 127) return true;
+	if (a === 169 && b === 254) return true; // link-local
+	if (a === 172 && b >= 16 && b <= 31) return true; // private
+	if (a === 192 && b === 168) return true; // private
+	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+	if (a === 192 && b === 0 && c === 2) return true; // TEST-NET-1
+	if (a === 198 && (b === 18 || b === 19)) return true; // benchmark
+	if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
+	if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
+	if (a >= 224) return true; // multicast / reserved
+	return false;
+}
+
+/** Obvious placeholder endpoints people paste instead of their real one. */
+const PLACEHOLDER_HOSTS = new Set([
+	"example.com", "example.net", "example.org", "example.edu",
+	"localhost", "google.com", "www.google.com", "baidu.com",
+	"1.2.3.4", "1.1.1.1", "8.8.8.8", "8.8.4.4", "0.0.0.0",
+	"test.com", "test", "invalid", "changeme", "your.endpoint", "endpoint",
+]);
+
+/** Reason string if the endpoint is obviously not a real clearnet WG endpoint
+ *  (placeholder host, reserved/private IP, or unresolvable), else null. */
+function endpointIssue(host: string, resolvedIp: string | null): string | null {
+	const h = host.trim().toLowerCase();
+	if (PLACEHOLDER_HOSTS.has(h)) return "placeholder / not a real endpoint";
+	if (!resolvedIp) return "does not resolve";
+	if (isReservedIp(resolvedIp)) return "reserved/private IP";
+	return null;
+}
+
 /**
  * Result of evaluating a peer request.
  * - `card`: the rendered admin notification (Markdown).
@@ -141,12 +186,17 @@ async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 		`🔑 IP ownership: ${ownOk ? "✅" : "⚠️"} ${ownBits.join(" · ") || "n/a"}`,
 	);
 
-	// Endpoint + CN + region
+	// Endpoint + sanity + CN + region
+	const epIssue = input.endpoint
+		? endpointIssue(input.endpoint, endpointIp)
+		: null;
 	if (input.endpoint) {
 		lines.push(
 			`📡 Endpoint: ${code(`${input.endpoint}:${input.port ?? "?"}`)}`,
 		);
-		if (endpointIp) {
+		if (epIssue) {
+			lines.push(`🚫 Endpoint: ⚠️ ${epIssue} — not a usable endpoint`);
+		} else if (endpointIp) {
 			const cn = isChinaIP(endpointIp);
 			if (cn && input.nodeAllowCn === false) {
 				lines.push(
@@ -157,8 +207,6 @@ async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 			} else {
 				lines.push(`🌏 Geo: ${code(endpointIp)} (non-CN) — verify same-region`);
 			}
-		} else {
-			lines.push("🌏 Geo: ⚠️ could not resolve endpoint");
 		}
 	} else {
 		lines.push("📡 Endpoint: ⚠️ NAT — peer initiates; their IP unknown here");
@@ -185,7 +233,14 @@ async function evaluate(input: ApprovalCardInput): Promise<PeerEvaluation> {
 	if (!peerOwn || !peerOwn.valid) {
 		reasons.push("peer IPv6 ownership unverified");
 	}
-	// Hard blocker 2: a resolvable endpoint that geolocates to CN on a node that
+	// Hard blocker 2: an obviously bogus endpoint (placeholder like google.com /
+	// 1.2.3.4, a reserved/private IP, or one that doesn't resolve). These can't be
+	// a real WireGuard endpoint, so send them to manual review instead of
+	// auto-approving.
+	if (epIssue) {
+		reasons.push(`endpoint invalid (${epIssue})`);
+	}
+	// Hard blocker 3: a resolvable endpoint that geolocates to CN on a node that
 	// rejects CN peers. (NAT peers have no endpoint here — handled at runtime.)
 	if (endpointIp && isChinaIP(endpointIp) && input.nodeAllowCn === false) {
 		reasons.push("endpoint is a CN IP on a node that rejects CN peers");
