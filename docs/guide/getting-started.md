@@ -12,7 +12,7 @@ The easiest way to peer with MoeNet on DN42 is through the Telegram Bot.
 
 ### Step 1: Login
 
-Open [@moenet_dn42_bot](https://t.me/moenet_dn42_bot) and authenticate:
+Open [@moenetdn42bot](https://t.me/moenetdn42bot) and authenticate:
 
 ```
 /login 4242421080
