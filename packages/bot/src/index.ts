@@ -78,6 +78,8 @@ interface SessionData {
     };
     /** Admin is being prompted for an ASN (view that ASN's peers, or add one). */
     peerAsnPrompt?: 'view' | 'add';
+    /** Admin is being asked for an optional rejection reason for this session. */
+    rejectReason?: { uuid: string };
     nodeWizard?: {
         step: 'name' | 'hostname' | 'ipv4' | 'ipv6' | 'role' | 'region' | 'location' | 'provider' | 'bandwidth' | 'max_peers' | 'allow_cn' | 'confirm';
         data: Record<string, unknown>;

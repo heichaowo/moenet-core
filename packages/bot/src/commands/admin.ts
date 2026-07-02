@@ -147,39 +147,51 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 	});
 
 	// Handle reject button
+	// Reject: ask for an optional reason first (the reason is stored on the
+	// session's lastError so the peer can see why). "rejnow:" skips the reason.
 	bot.callbackQuery(/^reject:(.+)$/, async (ctx) => {
 		if (!isAdmin(ctx)) {
 			await ctx.answerCallbackQuery("❌ Admin only");
 			return;
 		}
+		const uuid = ctx.match[1] as string;
+		ctx.session.rejectReason = { uuid };
+		await ctx.answerCallbackQuery();
+		await ctx.reply(
+			"✍️ *Rejection reason* (optional)\n拒绝理由(可选)\n\n" +
+				"Type a reason, or tap below to reject without one.\n" +
+				"输入理由,或点下方直接拒绝。",
+			{
+				parse_mode: "Markdown",
+				reply_markup: new InlineKeyboard()
+					.text("⏩ Reject w/o reason 无理由拒绝", `rejnow:${uuid}`)
+					.row()
+					.text("🔙 Cancel 取消", "pending:refresh"),
+			},
+		);
+	});
 
-		const uuid = ctx.match[1];
-
-		try {
-			const result = await apiRequest(
-				"/admin",
-				"POST",
-				{
-					action: "rejectSession",
-					uuid,
-					reason: "Rejected by admin",
-				},
-				config.apiToken,
-			);
-
-			if (result.code !== 0) {
-				await ctx.answerCallbackQuery(`❌ ${result.message}`);
-				return;
-			}
-
-			await ctx.answerCallbackQuery("✅ Rejected!");
-
-			// Refresh the list
-			await showPendingList(ctx, ctx.callbackQuery.message?.message_id);
-		} catch (error) {
-			console.error("[Reject] Error:", error);
-			await ctx.answerCallbackQuery("❌ Failed");
+	// Reject without a reason.
+	bot.callbackQuery(/^rejnow:(.+)$/, async (ctx) => {
+		if (!isAdmin(ctx)) {
+			await ctx.answerCallbackQuery("❌ Admin only");
+			return;
 		}
+		await ctx.answerCallbackQuery();
+		await submitReject(ctx, ctx.match[1] as string, "Rejected by admin");
+	});
+
+	// Collect a typed rejection reason.
+	bot.on("message:text", async (ctx, next) => {
+		const pending = ctx.session.rejectReason;
+		if (!pending) return next();
+		const text = ctx.message.text.trim();
+		if (text === "/cancel") {
+			ctx.session.rejectReason = undefined;
+			await ctx.reply("🚫 Cancelled.");
+			return;
+		}
+		await submitReject(ctx, pending.uuid, text || "Rejected by admin");
 	});
 
 	// Handle refresh button
@@ -2515,6 +2527,39 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			console.error("[Notify] Error:", error);
 			await ctx.reply("❌ Notification failed.\n通知发送失败。");
 		}
+	}
+}
+
+/**
+ * Reject a pending session with an optional reason, then refresh the list.
+ * The reason is stored on the session (lastError) so the peer can see it.
+ */
+async function submitReject(
+	ctx: BotContext,
+	uuid: string,
+	reason: string,
+): Promise<void> {
+	ctx.session.rejectReason = undefined;
+	try {
+		const result = await apiRequest(
+			"/admin",
+			"POST",
+			{ action: "rejectSession", uuid, reason },
+			config.apiToken,
+		);
+		if (result.code !== 0) {
+			await ctx.reply(`❌ ${result.message}`);
+			return;
+		}
+		await ctx.reply(
+			reason && reason !== "Rejected by admin"
+				? `✅ Rejected 已拒绝 — ${reason}`
+				: "✅ Rejected 已拒绝",
+		);
+		await showPendingList(ctx);
+	} catch (error) {
+		console.error("[Reject] Error:", error);
+		await ctx.reply("❌ Failed to reject.\n拒绝失败。");
 	}
 }
 
