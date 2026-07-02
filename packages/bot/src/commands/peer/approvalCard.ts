@@ -87,6 +87,20 @@ function endpointIssue(host: string, resolvedIp: string | null): string | null {
 }
 
 /**
+ * Synchronous endpoint sanity for creation-time rejection (no DNS): rejects
+ * placeholder hosts and literal reserved/private IPs. Domain names are left to
+ * the approval-time resolve check. Returns a reason string or null.
+ */
+export function endpointSyncIssue(host: string): string | null {
+	const h = host.trim().toLowerCase();
+	if (!h) return null;
+	if (PLACEHOLDER_HOSTS.has(h)) return "a placeholder / not a real endpoint";
+	const isLiteralIp = /^[0-9.]+$/.test(h) || h.includes(":");
+	if (isLiteralIp && isReservedIp(h)) return "a reserved/private IP";
+	return null;
+}
+
+/**
  * Result of evaluating a peer request.
  * - `card`: the rendered admin notification (Markdown).
  * - `autoApprove`: true when no *hard blocker* is present, so the request can

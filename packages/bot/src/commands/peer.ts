@@ -8,7 +8,7 @@ import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../serv
 import { DIVIDER } from '../templates';
 import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
 import { isAdmin } from '../guards';
-import { evaluatePeerRequest } from './peer/approvalCard';
+import { evaluatePeerRequest, endpointSyncIssue } from './peer/approvalCard';
 
 // Import from new peer module
 import {
@@ -977,6 +977,22 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                     if (match && match[1] && match[2]) {
                         endpoint = match[1];
                         port = parseInt(match[2], 10);
+                    }
+                }
+
+                // Reject obviously-bogus endpoints up front (placeholder host like
+                // google.com/1.2.3.4, or a reserved/private IP). Domains that only
+                // fail on DNS resolution are still caught later at approval time.
+                if (endpoint && endpoint !== '') {
+                    const epIssue = endpointSyncIssue(endpoint);
+                    if (epIssue) {
+                        await ctx.reply(
+                            `❌ \`${endpoint}\` is ${epIssue}.\n` +
+                            `这不是有效的 WireGuard 端点。请输入你真实的公网地址，或点 None (NAT)。\n` +
+                            `Enter your real public endpoint, or tap None (NAT).`,
+                            { parse_mode: 'Markdown' }
+                        );
+                        return;
                     }
                 }
 
