@@ -197,7 +197,8 @@ async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
         `🖥 Server: \`${s.serverEndpoint || '—'}\`\n` +
         `📏 MTU: \`${s.mtu || 1420}\`  ·  🔐 PSK: ${hasPsk ? 'on' : 'off'}\n` +
         `🔑 PubKey: \`${pubkey ? pubkey.slice(0, 20) + '…' : '—'}\`\n` +
-        `📇 Contact: \`${s.contact || '—'}\``;
+        `📇 Contact: \`${s.contact || '—'}\`` +
+        (s.lastError ? `\n⚠️ Note: \`${s.lastError}\`` : '');
 
     const kb = new InlineKeyboard()
         .text('✏️ Modify', `modify:peer:${uuid}`)

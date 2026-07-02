@@ -2534,6 +2534,79 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
  * Reject a pending session with an optional reason, then refresh the list.
  * The reason is stored on the session (lastError) so the peer can see it.
  */
+/** Notify the peer owner (Telegram + email) that their request was rejected.
+ *  Returns a short " · notified …" suffix for the admin confirmation line. */
+async function notifyRejection(
+	ctx: BotContext,
+	asn: number,
+	node: string,
+	reason: string,
+): Promise<string> {
+	const hasReason = reason && reason !== "Rejected by admin";
+	try {
+		const tr = await apiRequest(
+			"/admin",
+			"POST",
+			{ action: "getNotificationTargets", asns: [asn] },
+			config.apiToken,
+		);
+		const targets = (tr.data as { targets?: AnnounceTarget[] })?.targets || [];
+		const t = targets.find((x) => x.asn === asn);
+
+		let tg = false;
+		let email = false;
+
+		if (t?.telegramId) {
+			const msg =
+				`❌ *Peer Request Rejected*\nPeer 申请被拒绝\n\n` +
+				`🆔 AS${asn}${node ? ` @ \`${node}\`` : ""}\n` +
+				(hasReason ? `📝 Reason 原因: ${reason}\n` : "") +
+				`\nQuestions? Contact ${config.telegramContact}.\n如有疑问请联系 ${config.telegramContact}。`;
+			try {
+				await ctx.api.sendMessage(t.telegramId, msg, { parse_mode: "Markdown" });
+				tg = true;
+			} catch (e) {
+				console.error(`[RejectNotify] TG failed AS${asn}:`, e);
+			}
+		}
+		if (t?.emails?.length) {
+			const body =
+				`Your DN42 peer request (AS${asn}${node ? ` @ ${node}` : ""}) was rejected.` +
+				(hasReason ? `\n\nReason: ${reason}` : "") +
+				`\n\nQuestions? Contact ${config.telegramContact}.`;
+			try {
+				const er = await apiRequest(
+					"/admin",
+					"POST",
+					{
+						action: "sendEmail",
+						subject: "[MoeNet DN42] Peer request rejected",
+						message: body,
+						targets: t.emails.map((e) => ({ asn, email: e })),
+					},
+					config.apiToken,
+				);
+				email = er.code === 0;
+			} catch (e) {
+				console.error(`[RejectNotify] email failed AS${asn}:`, e);
+			}
+		}
+
+		if (tg && email) return " · notified TG+email 已通知";
+		if (tg) return " · notified TG 已通知";
+		if (email) return " · notified email 已邮件通知";
+		return " · ⚠️ no channel to notify 无法通知用户";
+	} catch (e) {
+		console.error("[RejectNotify] error:", e);
+		return "";
+	}
+}
+
+/**
+ * Reject a pending session with an optional reason, then refresh the list.
+ * The reason is stored on the session (lastError) so the peer can see it, and
+ * the peer owner is notified via Telegram + email.
+ */
 async function submitReject(
 	ctx: BotContext,
 	uuid: string,
@@ -2541,6 +2614,29 @@ async function submitReject(
 ): Promise<void> {
 	ctx.session.rejectReason = undefined;
 	try {
+		// Resolve ASN/node before rejecting (for the peer notification).
+		let asn = 0;
+		let node = "";
+		try {
+			const g = await apiRequest(
+				"/admin",
+				"POST",
+				{ action: "getSession", uuid },
+				config.apiToken,
+			);
+			const s = (
+				g.data as {
+					session?: { asn: number; routerName?: string; router: string };
+				}
+			)?.session;
+			if (s) {
+				asn = Number(s.asn);
+				node = s.routerName || s.router;
+			}
+		} catch {
+			/* best-effort */
+		}
+
 		const result = await apiRequest(
 			"/admin",
 			"POST",
@@ -2551,10 +2647,12 @@ async function submitReject(
 			await ctx.reply(`❌ ${result.message}`);
 			return;
 		}
+
+		const delivered = asn ? await notifyRejection(ctx, asn, node, reason) : "";
 		await ctx.reply(
-			reason && reason !== "Rejected by admin"
-				? `✅ Rejected 已拒绝 — ${reason}`
-				: "✅ Rejected 已拒绝",
+			`✅ Rejected 已拒绝` +
+				(reason && reason !== "Rejected by admin" ? ` — ${reason}` : "") +
+				delivered,
 		);
 		await showPendingList(ctx);
 	} catch (error) {
