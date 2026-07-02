@@ -18,12 +18,17 @@ Requires login (`/login` first).
 
 | Command | Description |
 |---------|-------------|
-| `/peer` | Create new peer (guided wizard) |
-| `/info` | View your current peers |
-| `/modify` | Modify peer settings (endpoint, MTU) |
-| `/remove` | Delete a peer |
-| `/status` | Check WireGuard & BGP status |
-| `/restart` | Restart WireGuard tunnel |
+| `/peer` | **Unified peer hub** — your peers as an inline list → tap one for a detail card with ✏️ Modify · 🗑 Delete · 📊 Status · 🔄 Restart, plus ➕ New Peer (inline creation wizard) |
+| `/node` | Browse nodes (inline list → details). Everyone can view; admins also get add/edit/delete/bootstrap/maintenance/peers |
+| `/info` | Peer status & config (also on the `/peer` detail card) |
+| `/modify` | Modify a peer (also ✏️ on the `/peer` detail card) |
+| `/remove` | Delete a peer, with a confirmation code (also 🗑 on the `/peer` detail card) |
+| `/status` | WireGuard & BGP status (also 📊 on the `/peer` detail card) |
+| `/restart` | Restart a peer session (also 🔄 on the `/peer` detail card) |
+
+> The `/peer` detail card also shows a rejected peer's reason (`⚠️ Note`). The old
+> per-field commands above are kept as aliases; the inline `/peer` flow is the
+> recommended entry point.
 
 ## Network Tools
 
@@ -44,13 +49,18 @@ Requires admin privileges.
 
 | Command | Description |
 |---------|-------------|
-| `/addnode` | Add new node (wizard) |
-| `/bootstrap <node>` | Generate bootstrap script |
-| `/delnode <node>` | Delete a node |
-| `/nodes` | List all nodes |
-| `/pending` | List pending peer requests |
-| `/block <ASN>` | Block an ASN |
-| `/main` | Toggle maintenance mode |
+| `/node` | **Node management** — add / edit / delete (cascades sessions) / bootstrap token / maintenance / view peers. Replaces the old `/addnode`, `/delnode`, `/bootstrap`, `/nodes` |
+| `/peer` | With no arg, admins get a panel: 📋 all sessions · ➕ add peer (any ASN, any node) · ⏳ pending · 🔍 by ASN. `/peer <asn>` views a specific ASN |
+| `/addpeer <asn>` | Add a peer for any ASN on any node (also the panel's ➕) |
+| `/pending` | List pending peer requests (✅ Approve / ❌ Reject; reject asks for an optional reason and notifies the peer via TG + email) |
+| `/sessions` | All BGP sessions (grouped, with health) |
+| `/block <ASN>` · `/unblock <ASN>` | Block / unblock an ASN |
+| `/announce` · `/notify` | Broadcast / targeted user messages |
+| `/main` | Maintenance mode (also 🔧 on the `/node` detail card) |
+
+**Peer approval:** all non-admin requests go to manual review by default. Set
+`PEER_AUTO_APPROVE=true` to enable lenient auto-approve (all-green requests skip
+review; hard blockers — unowned ULA/GUA IP, bogus/CN endpoint — still escalate).
 
 ## Status & Metrics
 

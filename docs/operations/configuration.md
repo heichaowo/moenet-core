@@ -31,6 +31,7 @@ All configuration is via environment variables in `.env`.
 | `REDIS_URL` | `redis://moenet-redis:6379` | Redis connection URL |
 | `TRUSTED_PROXY_COUNT` | `1` | Number of trusted reverse proxies in front of the API. Controls which `X-Forwarded-For` hop is used as the client IP for rate limiting and audit logs — set it to match your proxy chain or per-client limits will be wrong. |
 | `AGENT_AUTOUPDATE` | on | Set to `false` to stop the Control Plane telling agents to auto-update. Use this when running custom/locally-built agent binaries (otherwise the stable auto-updater reverts them). |
+| `PEER_AUTO_APPROVE` | off | Peer-request approval policy. Default (`false`/unset) sends **all** non-admin requests to manual review. Set `true` for lenient auto-approve: all-green requests skip review, while hard blockers (unowned ULA/GUA IP, placeholder/reserved/CN endpoint) still escalate. |
 | `GRAFANA_PASSWORD` | — | Grafana admin password (used by the monitoring stack — set it, the compose no longer silently defaults to `admin`). |
 | `RATE_LIMIT_MAX` | `20` | Bot requests per minute |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window |
