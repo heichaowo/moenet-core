@@ -68,7 +68,7 @@ export function registerConfirmHandlers(bot: Bot<BotContext>) {
                     contact: flow.contact,
                     sessionType: flow.sessionType,
                 });
-                if (evaluation.autoApprove) {
+                if (config.peerAutoApprove && evaluation.autoApprove) {
                     const appr = await apiRequest('/admin', 'POST', {
                         action: 'approveSession',
                         uuid: sessionUuid,
