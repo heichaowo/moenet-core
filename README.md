@@ -21,7 +21,7 @@ Control Plane for the [MoeNet DN42](https://dn42.moenet.work) network. Provides 
 
 ## Features
 
-- **Telegram Bot** - Complete peering management via [@moenet_dn42_bot](https://t.me/moenet_dn42_bot)
+- **Telegram Bot** - Complete peering management via [@moenetdn42bot](https://t.me/moenetdn42bot)
 - **Multi-auth** - GPG, SSH, or Email verification against DN42 registry
 - **Node Bootstrap** - One-command setup for new nodes
 - **Real-time Status** - WireGuard and BGP status via network tools

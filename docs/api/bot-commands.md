@@ -1,6 +1,6 @@
 # Bot Commands
 
-The MoeNet DN42 Bot ([@moenet_dn42_bot](https://t.me/moenet_dn42_bot)) provides a bilingual (EN/ZH) interface for peering management.
+The MoeNet DN42 Bot ([@moenetdn42bot](https://t.me/moenetdn42bot)) provides a bilingual (EN/ZH) interface for peering management.
 
 ## User Commands
 
