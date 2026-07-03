@@ -18,10 +18,12 @@ function buildCommunityKeyboard(
 ): InlineKeyboard {
     const kb = new InlineKeyboard();
     const ids = Array.from(nodesMap.keys()).sort();
-    ids.forEach((n) => {
+    ids.forEach((n, i) => {
         const loc = nodesMap.get(n)?.location;
         const label = loc ? `${n} · ${loc}` : n;
         kb.text(n === selectedId ? `✅ ${label}` : label, `community:${n}`);
+        // 2 per row so labels aren't squeezed into unreadable slivers.
+        if ((i + 1) % 2 === 0) kb.row();
     });
     return kb;
 }
@@ -185,31 +187,20 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
     });
 
-    // Handle probe now button
-    bot.callbackQuery(/^probe_now:(\d+)$/, async (ctx) => {
-        const asnStr = ctx.match?.[1];
-        if (!asnStr) return;
+    // Handle probe now button — probes on the peer's own node (node:asn).
+    bot.callbackQuery(/^probe_now:([^:]+):(\d+)$/, async (ctx) => {
+        const node = ctx.match?.[1];
+        const asnStr = ctx.match?.[2];
+        if (!node || !asnStr) return;
         const asn = parseInt(asnStr);
 
-        await ctx.answerCallbackQuery('Starting probe...');
-
-        // Get first node from provider
-        const nodesMap = await getNodes();
-        const nodeIds = Array.from(nodesMap.keys()).sort();
-        if (nodeIds.length === 0) {
-            await ctx.answerCallbackQuery('No nodes available');
-            return;
-        }
-
-        const firstNode = nodeIds[0]!;
-
-        const result = await callAgentApi(firstNode, 'POST', '/probe/now', { asn }) as ProbeResult | null;
+        const result = await callAgentApi(node, 'POST', '/probe/now', { asn }) as ProbeResult | null;
 
         if (result?.success) {
-            await ctx.answerCallbackQuery(`✅ Probe: ${result.rtt_ms?.toFixed(1)}ms (Tier ${result.latency_tier})`);
+            await ctx.answerCallbackQuery(`✅ ${result.rtt_ms?.toFixed(1)}ms (Tier ${result.latency_tier})`);
             // Edit the existing latency message in place instead of sending a new
             // one on every probe (was flooding the chat).
-            await showLatencyStats(ctx, asn, ctx.callbackQuery.message?.message_id);
+            await showLatencyStats(ctx, asn, node, ctx.callbackQuery.message?.message_id);
         } else {
             await ctx.answerCallbackQuery(`❌ Probe failed: ${result?.error || 'Unknown error'}`);
         }
@@ -221,20 +212,13 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
  * "Probe Now" button. Reached from the /peer detail card's ⏱ Latency button.
  * Pass editId to update an existing message (probe-now) instead of replying anew.
  */
-export async function showLatencyStats(ctx: BotContext, asn: number, editId?: number) {
-    const nodesMap = await getNodes();
-    const nodeIds = Array.from(nodesMap.keys()).sort();
-    if (nodeIds.length === 0) {
-        await ctx.reply('❌ No nodes available.');
-        return;
-    }
-
-    const firstNode = nodeIds[0]!;
-
-    const stats = await callAgentApi(firstNode, 'POST', '/probe/stats', { asn }) as ProbeStats | null;
+export async function showLatencyStats(ctx: BotContext, asn: number, node: string, editId?: number) {
+    // Probe on the node the peer actually lives on (not an arbitrary first node),
+    // otherwise the peer isn't found there and the probe always returns nothing.
+    const stats = await callAgentApi(node, 'POST', '/probe/stats', { asn }) as ProbeStats | null;
 
     const keyboard = new InlineKeyboard()
-        .text('🔄 立即探测 Probe Now', `probe_now:${asn}`);
+        .text('🔄 立即探测 Probe Now', `probe_now:${node}:${asn}`);
 
     let text: string;
     if (stats?.last_rtt) {

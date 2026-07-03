@@ -208,7 +208,7 @@ async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
         .text('📊 Status', `peer:st:${uuid}`)
         .text('🔄 Restart', `peer:rs:${uuid}`)
         .row()
-        .text('⏱ Latency', `peer:lat:${s.asn}`)
+        .text('⏱ Latency', `peer:lat:${s.routerName || s.router}:${s.asn}`)
         .text('🔙 Peers', 'peer:list');
 
     const render = (pm?: 'Markdown') =>
@@ -533,9 +533,10 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
     // Page-indicator button — no-op (just clears the loading spinner).
     bot.callbackQuery('peer:all:noop', async (ctx) => { await ctx.answerCallbackQuery(); });
     // ⏱ Latency button on the peer detail card → WireGuard RTT probe (was /latency).
-    bot.callbackQuery(/^peer:lat:(\d+)$/, async (ctx) => {
+    // Carries the peer's node so we probe where the peer actually lives.
+    bot.callbackQuery(/^peer:lat:([^:]+):(\d+)$/, async (ctx) => {
         await ctx.answerCallbackQuery('⏱ Probing…');
-        await showLatencyStats(ctx, parseInt(ctx.match[1]!, 10));
+        await showLatencyStats(ctx, parseInt(ctx.match[2]!, 10), ctx.match[1]!);
     });
     bot.callbackQuery('peer:byasn', async (ctx) => {
         if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
