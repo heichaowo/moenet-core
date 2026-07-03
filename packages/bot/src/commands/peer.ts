@@ -1435,11 +1435,13 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             const sessions: Array<{ uuid: string; router: string; routerName?: string; status: number; ipv6?: string; endpoint?: string; serverEndpoint?: string; serverWgKey?: string }> = result.data?.sessions || [];
 
             if (sessions.length === 0) {
+                const emptyKb = targetAsn === ctx.session.asn
+                    ? new InlineKeyboard().text('➕ New Peer', 'peer:new')
+                    : undefined;
                 await ctx.reply(
                     `📊 *Peer Info for AS${targetAsn}*\n\n` +
-                    `No peers found.\n没有 Peer\n\n` +
-                    `Use /peer to create one.\n使用 /peer 创建。`,
-                    { parse_mode: 'Markdown' }
+                    `No peers found.\n没有 Peer`,
+                    { parse_mode: 'Markdown', reply_markup: emptyKb }
                 );
                 return;
             }
@@ -1540,7 +1542,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
             const keyboard = new InlineKeyboard()
                 .text('🔄 Refresh 刷新', `info:refresh:${targetAsn}`)
-                .text('🔧 Modify 修改', 'info:modify');
+                .text('🔧 Modify 修改', `info:modify:${targetAsn}`);
 
             await ctx.reply(message, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (error) {
@@ -1566,38 +1568,25 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         await fetchAndDisplayInfo(ctx, targetAsn, useAdminApi);
     });
 
-    bot.callbackQuery('info:modify', async (ctx) => {
-        await ctx.answerCallbackQuery();
-        await ctx.reply('Use /modify to modify a peer\n使用 /modify 修改 Peer');
-    });
+    // Modify button on the Peer Info card → open the same inline peer picker
+    // as /modify (no "type /modify" dead-end). ASN is carried on the button.
+    bot.callbackQuery(/^info:modify:(\d+)$/, async (ctx) => {
+        const targetAsn = parseInt(ctx.match[1]!, 10);
 
-    /**
-     * /modify - Modify existing peer
-     */
-    bot.command('modify', async (ctx) => {
-        // Check if admin specifying ASN
-        const args = ctx.match?.trim().split(/\s+/) || [];
-        let targetAsn = ctx.session.asn;
-        let isAdminMode = false;
-
-        const username = ctx.from?.username?.toLowerCase();
-        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
-        const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
-
-        if (args[0] && isAsnInput(args[0])) {
-            if (!isAdmin) {
-                await ctx.reply('❌ Only admin can modify other ASN peers\n只有管理员可以修改其他 ASN 的 Peer');
-                return;
-            }
-            targetAsn = normalizeAsn(args[0]);
-            isAdminMode = true;
-        }
-
-        if (!targetAsn) {
-            await ctx.reply('❌ Please /login first.\n请先登录');
+        // Ownership: a non-admin may only modify their own ASN. Without this,
+        // a crafted info:modify:<other-asn> would enumerate another peer.
+        if (!isAdmin(ctx) && targetAsn !== ctx.session.asn) {
+            await ctx.answerCallbackQuery('❌ Not your ASN / 不是你的 ASN');
             return;
         }
 
+        await ctx.answerCallbackQuery();
+        await presentModifyPeerPicker(ctx, targetAsn);
+    });
+
+    // Shared inline "pick a peer to modify" flow, used by both /modify and the
+    // Peer Info card's Modify button so neither dead-ends into "type /modify".
+    async function presentModifyPeerPicker(ctx: BotContext, targetAsn: number) {
         try {
             // Always use the admin API: the bot holds the admin token, while
             // /session needs a per-user JWT the bot never has (caused "Unauthorized"
@@ -1633,6 +1622,36 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             console.error('[Modify] Error:', error);
             await ctx.reply('❌ Failed to fetch peers.');
         }
+    }
+
+    /**
+     * /modify - Modify existing peer
+     */
+    bot.command('modify', async (ctx) => {
+        // Check if admin specifying ASN
+        const args = ctx.match?.trim().split(/\s+/) || [];
+        let targetAsn = ctx.session.asn;
+        let isAdminMode = false;
+
+        const username = ctx.from?.username?.toLowerCase();
+        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
+        const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
+
+        if (args[0] && isAsnInput(args[0])) {
+            if (!isAdmin) {
+                await ctx.reply('❌ Only admin can modify other ASN peers\n只有管理员可以修改其他 ASN 的 Peer');
+                return;
+            }
+            targetAsn = normalizeAsn(args[0]);
+            isAdminMode = true;
+        }
+
+        if (!targetAsn) {
+            await ctx.reply('❌ Please /login first.\n请先登录');
+            return;
+        }
+
+        await presentModifyPeerPicker(ctx, targetAsn);
     });
 
     /**
@@ -2246,48 +2265,9 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        try {
-            const result = await apiRequest('/admin', 'POST', {
-                action: 'enumSessions',
-                asn: targetAsn,
-            }, config.apiToken);
-
-            if (result.code !== 0) {
-                await ctx.reply(`❌ Error: ${result.message}`);
-                return;
-            }
-
-            const sessions: Array<{
-                uuid: string;
-                router: string;
-                routerName?: string;
-                status: number;
-            }> = result.data?.sessions || [];
-
-            if (sessions.length === 0) {
-                await ctx.reply(
-                    `📋 *Peers for AS${targetAsn}*\n\n` +
-                    `No peers found. Use /peer to create one.\n` +
-                    `没有 Peer，使用 /peer 创建。`,
-                    { parse_mode: 'Markdown' }
-                );
-                return;
-            }
-
-            let message = `📋 *Peers for AS${targetAsn}* (${sessions.length})\n\n`;
-
-            for (const s of sessions) {
-                const displayName = s.routerName || s.router;
-                const status = STATUS_LABELS[s.status] || `❓ Unknown(${s.status})`;
-                message += `• \`${displayName}\` — ${status}\n`;
-            }
-
-            message += `\nUse /info for details, /modify to change, /remove to delete.`;
-
-            await ctx.reply(message, { parse_mode: 'Markdown' });
-        } catch (error) {
-            console.error('[Peers] Error:', error);
-            await ctx.reply('❌ Failed to fetch peers.');
-        }
+        // Unified inline list (buttons → detail card), same as /peer. No text
+        // command hints — every action is a tap. adminMode when viewing another
+        // ASN (hides ➕ New Peer, which only makes sense for your own ASN).
+        await showPeerList(ctx, targetAsn, targetAsn !== ctx.session.asn);
     });
 }
