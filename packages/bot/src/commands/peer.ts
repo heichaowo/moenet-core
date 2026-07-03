@@ -1631,7 +1631,6 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         // Check if admin specifying ASN
         const args = ctx.match?.trim().split(/\s+/) || [];
         let targetAsn = ctx.session.asn;
-        let isAdminMode = false;
 
         const username = ctx.from?.username?.toLowerCase();
         const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
@@ -1643,7 +1642,6 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
                 return;
             }
             targetAsn = normalizeAsn(args[0]);
-            isAdminMode = true;
         }
 
         if (!targetAsn) {
