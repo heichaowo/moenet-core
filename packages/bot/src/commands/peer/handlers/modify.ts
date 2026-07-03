@@ -135,14 +135,6 @@ export function registerModifyHandlers(
     });
 
     /**
-     * Handle info:modify callback
-     */
-    bot.callbackQuery('info:modify', async (ctx) => {
-        await ctx.answerCallbackQuery('Use /modify command');
-        await ctx.reply('Use /modify to modify a peer\n使用 /modify 修改 Peer');
-    });
-
-    /**
      * Handle modify cancel
      */
     bot.callbackQuery('modify:cancel', async (ctx) => {
