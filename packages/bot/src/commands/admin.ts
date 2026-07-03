@@ -2428,6 +2428,9 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 		await executeDirectNotify(ctx, flow.asns, flow.message);
 		ctx.session.notifyFlow = undefined;
+		// executeDirectNotify posts its report as a new message; drop the
+		// now-redundant "Sending…" placeholder so it doesn't linger as an orphan.
+		await ctx.deleteMessage().catch(() => {});
 	});
 
 	// ntf:cancel → abort
