@@ -72,12 +72,7 @@ async function apiRequest(endpoint: string, method = 'POST', body?: unknown): Pr
             },
             body: body ? JSON.stringify(body) : undefined,
         });
-        const text = await response.text();
-        try {
-            return JSON.parse(text) as APIResponse;
-        } catch {
-            return { code: -1, message: `HTTP ${response.status}: ${text.slice(0, 120) || 'empty response'}` };
-        }
+        return (await response.json()) as APIResponse;
     } catch (e) {
         return { code: -1, message: `Request failed: ${(e as Error).message}` };
     }
