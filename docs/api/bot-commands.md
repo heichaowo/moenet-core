@@ -62,10 +62,13 @@ review; hard blockers — unowned ULA/GUA IP, bogus/CN endpoint — still escala
 
 | Command | Description |
 |---------|-------------|
-| `/stats` | Network statistics |
+| `/stats` | Network statistics (`/stats <asn>` for DN42 MAP info) |
 | `/rank` | Node ranking by metrics |
-| `/community` | BGP community reference |
-| `/latency` | Inter-node latency matrix |
+| `/community` | Per-node BGP community / route stats |
+
+> A peer's WireGuard latency (RTT probe) is on the `/peer` detail card — tap
+> **⏱ Latency** (this replaced the old standalone `/latency` command). The old
+> `/peerlist` command was removed; use `/peer` for your peers.
 
 ## Peer Creation Flow
 

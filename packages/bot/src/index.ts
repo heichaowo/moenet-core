@@ -200,7 +200,6 @@ async function setBotCommands(bot: Bot<BotContext>) {
         { command: 'flaps', description: 'Route flap history 路由抖动' },
         { command: 'stats', description: 'Network stats 网络统计' },
         { command: 'rank', description: 'Peer rankings 排行榜' },
-        { command: 'peerlist', description: 'All peers list 全部用户' },
         { command: 'cancel', description: 'Cancel operation 取消操作' },
     ];
     await bot.api.setMyCommands(publicCommands);

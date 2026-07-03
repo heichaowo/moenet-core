@@ -18,15 +18,26 @@ import config from '../config';
 // Zod Schemas
 // ---------------------------------------------------------------------------
 
+// iedon now nests graph metrics under a `centrality` object and names the AS via
+// `desc`. Older flat fields are kept optional so we tolerate either shape.
+const CentralitySchema = z.object({
+    degree: z.number().optional(),
+    betweenness: z.number().optional(),
+    closeness: z.number().optional(),
+    index: z.number().optional(),
+    ranking: z.number().optional(),
+});
+
 const AsnInfoResponseSchema = z.object({
     asn: z.number().optional(),
     name: z.string().optional(),
     asName: z.string().optional(),
+    desc: z.string().optional(),
     peers: z.union([z.array(z.number()), z.record(z.string(), z.unknown())]).optional(),
     neighbors: z.union([z.array(z.number()), z.record(z.string(), z.unknown())]).optional(),
     peer_count: z.number().optional(),
     peerCount: z.number().optional(),
-    centrality: z.number().optional(),
+    centrality: z.union([z.number(), CentralitySchema]).optional(),
     closeness: z.number().optional(),
     betweenness: z.number().optional(),
     whois: z.string().optional(),
@@ -208,14 +219,19 @@ export async function getAsnInfo(asn: number): Promise<AsnInfo | null> {
                     .filter((n) => !Number.isNaN(n));
             }
 
+            // centrality may be a flat number (old shape) or a nested object (current
+            // iedon shape); derive the metrics from whichever we got.
+            const cen = data.centrality;
+            const cenObj = cen && typeof cen === 'object' ? cen : null;
+
             const info: AsnInfo = {
                 asn,
-                name: data.name ?? data.asName ?? 'Unknown',
-                peerCount: peers.length || data.peer_count || data.peerCount || 0,
+                name: data.desc ?? data.name ?? data.asName ?? 'Unknown',
+                peerCount: peers.length || cenObj?.degree || data.peer_count || data.peerCount || 0,
                 peers: peers.slice(0, 50),
-                centrality: data.centrality ?? 0,
-                closeness: data.closeness ?? 0,
-                betweenness: data.betweenness ?? 0,
+                centrality: cenObj?.index ?? (typeof cen === 'number' ? cen : 0),
+                closeness: cenObj?.closeness ?? data.closeness ?? 0,
+                betweenness: cenObj?.betweenness ?? data.betweenness ?? 0,
                 whois: data.whois,
             };
 
