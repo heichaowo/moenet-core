@@ -177,8 +177,8 @@ export function createBot(): Bot<BotContext> {
  * Set bot commands menu
  */
 async function setBotCommands(bot: Bot<BotContext>) {
-    // Public commands visible to all users
-    await bot.api.setMyCommands([
+    // Public commands — visible to all users (default scope).
+    const publicCommands = [
         { command: 'start', description: 'Start / Help 开始' },
         { command: 'help', description: 'Show commands 帮助' },
         { command: 'login', description: 'Login with ASN 登录' },
@@ -202,18 +202,25 @@ async function setBotCommands(bot: Bot<BotContext>) {
         { command: 'rank', description: 'Peer rankings 排行榜' },
         { command: 'peerlist', description: 'All peers list 全部用户' },
         { command: 'cancel', description: 'Cancel operation 取消操作' },
-    ]);
+    ];
+    await bot.api.setMyCommands(publicCommands);
 
-    // Admin-only commands (visible only in admin chat)
+    // Admin chat scope. A chat-scoped list REPLACES (not merges with) the default
+    // for that chat, so include the full public list too — otherwise the admin
+    // would see ONLY the admin commands and lose /peer, tools, etc.
     if (config.adminChatId) {
-        await bot.api.setMyCommands([
+        const adminCommands = [
             { command: 'pending', description: 'Pending reviews 待审核' },
             { command: 'migrate', description: 'Bulk migrate 批量迁移' },
             { command: 'announce', description: 'Broadcast message 全员公告' },
             { command: 'notify', description: 'Notify users 定向通知' },
             { command: 'block', description: 'Block ASN 封禁' },
             { command: 'unblock', description: 'Unblock ASN 解封' },
-        ], { scope: { type: 'chat', chat_id: Number(config.adminChatId) } });
+        ];
+        await bot.api.setMyCommands(
+            [...publicCommands, ...adminCommands],
+            { scope: { type: 'chat', chat_id: Number(config.adminChatId) } },
+        );
     }
 }
 
