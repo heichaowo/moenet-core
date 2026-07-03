@@ -45,7 +45,10 @@ async function callAgentApi(nodeId: string, method: string, path: string, body?:
             body: body ? JSON.stringify(body) : undefined,
             signal: AbortSignal.timeout(5000),
         });
-        return response.json();
+        if (!response.ok) return null;
+        // await so a JSON-parse rejection is caught here (returns null) instead of
+        // escaping the missing-await return and crashing the calling handler.
+        return await response.json();
     } catch (error) {
         console.error(`[Agent] API call failed: ${error}`);
         return null;
