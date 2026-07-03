@@ -3,9 +3,29 @@ import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
+import { escapeMarkdown } from '../markdown';
 import { normalizeAsn } from './peer/validators';
 
 const ERROR_NOT_LOGGED_IN = '❌ Please /login first\n请先登录';
+
+/**
+ * Node-selection keyboard for /community. Labels each button with the node id
+ * (unique + short) plus its location so two nodes in the same city (hk1/hk2)
+ * stay distinguishable instead of both showing a truncated "Hong Kong".
+ */
+function buildCommunityKeyboard(
+    nodesMap: Map<string, { location?: string }>,
+    selectedId: string,
+): InlineKeyboard {
+    const kb = new InlineKeyboard();
+    const ids = Array.from(nodesMap.keys()).sort();
+    ids.forEach((n) => {
+        const loc = nodesMap.get(n)?.location;
+        const label = loc ? `${n} · ${loc}` : n;
+        kb.text(n === selectedId ? `✅ ${label}` : label, `community:${n}`);
+    });
+    return kb;
+}
 
 /**
  * Call agent API using getAgentEndpoint for node resolution
@@ -86,13 +106,13 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         const nodeId = nodeIds[0]!;
         const nodeName = nodesMap.get(nodeId)?.location || nodeId;
 
-        await ctx.reply(`📊 Fetching community stats from ${nodeName}...`);
+        const loading = await ctx.reply(`📊 Fetching community stats from ${nodeName}...`);
 
         try {
             const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
             if (!stats) {
-                await ctx.reply('❌ Failed to get community stats.\n无法获取 community 统计。');
+                await ctx.api.editMessageText(loading.chat.id, loading.message_id, '❌ Failed to get community stats.\n无法获取 community 统计。');
                 return;
             }
 
@@ -105,7 +125,7 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
                 .join('\n') || '    (无数据 No data)';
 
             const text = COMMUNITY_STATS
-                .replace('{node}', nodeName)
+                .replace('{node}', escapeMarkdown(nodeName))
                 .replace('{t0}', String(latency[0] || 0))
                 .replace('{t1}', String(latency[1] || 0))
                 .replace('{t2}', String(latency[2] || 0))
@@ -116,17 +136,11 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
                 .replace('{regions}', regionsText)
                 .replace('{total}', String(stats.total_routes || 0));
 
-            // Node selection keyboard (sorted)
-            const keyboard = new InlineKeyboard();
-            nodeIds.forEach(n => {
-                const name = nodesMap.get(n)?.location || n;
-                keyboard.text(n === nodeId ? `✅ ${name}` : name, `community:${n}`);
-            });
-
-            await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+            const keyboard = buildCommunityKeyboard(nodesMap, nodeId);
+            await ctx.api.editMessageText(loading.chat.id, loading.message_id, text, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (error) {
             console.error('[Community] Error:', error);
-            await ctx.reply(`❌ Error: ${(error as Error).message}`);
+            await ctx.api.editMessageText(loading.chat.id, loading.message_id, `❌ Error: ${(error as Error).message}`);
         }
     });
 
@@ -143,7 +157,8 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
         if (!stats) {
-            await ctx.answerCallbackQuery('Failed to load stats');
+            await ctx.answerCallbackQuery('❌ Failed to load stats');
+            await ctx.editMessageText(`❌ Failed to load community stats from ${nodeName}.\n无法从该节点获取统计。`);
             return;
         }
 
@@ -156,7 +171,7 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             .join('\n') || '    (无数据 No data)';
 
         const text = COMMUNITY_STATS
-            .replace('{node}', nodeName)
+            .replace('{node}', escapeMarkdown(nodeName))
             .replace('{t0}', String(latency[0] || 0))
             .replace('{t1}', String(latency[1] || 0))
             .replace('{t2}', String(latency[2] || 0))
@@ -167,13 +182,7 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             .replace('{regions}', regionsText)
             .replace('{total}', String(stats.total_routes || 0));
 
-        const nodeIds = Array.from(nodesMap.keys()).sort();
-        const keyboard = new InlineKeyboard();
-        nodeIds.forEach(n => {
-            const name = nodesMap.get(n)?.location || n;
-            keyboard.text(n === nodeId ? `✅ ${name}` : name, `community:${n}`);
-        });
-
+        const keyboard = buildCommunityKeyboard(nodesMap, nodeId);
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
     });
 

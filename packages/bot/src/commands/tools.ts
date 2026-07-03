@@ -4,6 +4,7 @@ import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
 import { lookupWhois, formatWhoisResult, getWhoisAttr, fetchContacts } from '../services/dn42Registry';
+import { codeSafe } from '../markdown';
 import { normalizeAsn, isAsnInput } from './peer/validators';
 
 /**
@@ -503,10 +504,10 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
         await ctx.reply(
             `🔍 *DNS Query*\n\n` +
-            `Domain: \`${domain}\`\n` +
+            `Domain: \`${codeSafe(domain)}\`\n` +
             `Type: \`${recordType}\`\n` +
             `Server: \`anycast.baka.dn42\`\n\n` +
-            `\`\`\`\n${result || 'No records found'}\n\`\`\``,
+            `\`\`\`\n${codeSafe(result || 'No records found')}\n\`\`\``,
             { parse_mode: 'Markdown' }
         );
     });
@@ -530,7 +531,7 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
             if (contacts.length > 0) {
                 await ctx.reply(
-                    `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${contacts.join('\n')}\n\`\`\``,
+                    `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${codeSafe(contacts.join('\n'))}\n\`\`\``,
                     { parse_mode: 'Markdown' }
                 );
             } else {
@@ -545,7 +546,7 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
                 }
                 if (localContacts.length > 0) {
                     await ctx.reply(
-                        `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${localContacts.join('\n')}\n\`\`\``,
+                        `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${codeSafe(localContacts.join('\n'))}\n\`\`\``,
                         { parse_mode: 'Markdown' }
                     );
                 } else {
