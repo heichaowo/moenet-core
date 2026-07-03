@@ -153,12 +153,10 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         const nodesMap = await getNodes();
         const nodeName = nodesMap.get(nodeId)?.location || nodeId;
 
-        await ctx.answerCallbackQuery('Loading...');
-
         const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
         if (!stats) {
-            await ctx.answerCallbackQuery('❌ Failed to load stats');
+            await ctx.answerCallbackQuery(`❌ ${nodeName}: no data`);
             await ctx.editMessageText(`❌ Failed to load community stats from ${nodeName}.\n无法从该节点获取统计。`);
             return;
         }
@@ -184,7 +182,18 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             .replace('{total}', String(stats.total_routes || 0));
 
         const keyboard = buildCommunityKeyboard(nodesMap, nodeId);
-        await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+        try {
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e) {
+            // "not modified" (same node re-tapped) or a Markdown hiccup shouldn't
+            // look like a dead button — always give a toast, and fall back to plain.
+            if (!(e instanceof Error && e.message.includes('not modified'))) {
+                await ctx.editMessageText(text, { reply_markup: keyboard }).catch(() => {});
+            }
+        }
+        // Confirm which node loaded (the numbers can look identical across nodes,
+        // so without this a successful switch reads as "nothing happened").
+        await ctx.answerCallbackQuery(`📊 ${nodeName}`);
     });
 
     // Handle probe now button — probes on the peer's own node (node:asn).
