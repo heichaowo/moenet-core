@@ -4,7 +4,6 @@ import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
 import { escapeMarkdown } from '../markdown';
-import { normalizeAsn } from './peer/validators';
 
 const ERROR_NOT_LOGGED_IN = '❌ Please /login first\n请先登录';
 
@@ -186,26 +185,6 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
     });
 
-    /**
-     * /latency [asn] - Show latency probe results
-     */
-    bot.command('latency', async (ctx) => {
-        if (!ctx.session.asn) {
-            await ctx.reply(ERROR_NOT_LOGGED_IN);
-            return;
-        }
-
-        const asnRaw = ctx.match?.trim();
-        const asn = asnRaw ? normalizeAsn(asnRaw) : ctx.session.asn;
-
-        if (!asn || isNaN(asn)) {
-            await ctx.reply('用法: /latency [ASN]\n例如: /latency 4242421234');
-            return;
-        }
-
-        await showLatencyStats(ctx, asn);
-    });
-
     // Handle probe now button
     bot.callbackQuery(/^probe_now:(\d+)$/, async (ctx) => {
         const asnStr = ctx.match?.[1];
@@ -228,23 +207,21 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
 
         if (result?.success) {
             await ctx.answerCallbackQuery(`✅ Probe: ${result.rtt_ms?.toFixed(1)}ms (Tier ${result.latency_tier})`);
-            await showLatencyStats(ctx, asn);
+            // Edit the existing latency message in place instead of sending a new
+            // one on every probe (was flooding the chat).
+            await showLatencyStats(ctx, asn, ctx.callbackQuery.message?.message_id);
         } else {
             await ctx.answerCallbackQuery(`❌ Probe failed: ${result?.error || 'Unknown error'}`);
         }
     });
-
-    // Handle latency selection
-    bot.callbackQuery(/^latency:(\d+)$/, async (ctx) => {
-        const asnStr = ctx.match?.[1];
-        if (!asnStr) return;
-        const asn = parseInt(asnStr);
-        await ctx.answerCallbackQuery();
-        await showLatencyStats(ctx, asn);
-    });
 }
 
-async function showLatencyStats(ctx: BotContext, asn: number) {
+/**
+ * Show a peer's WireGuard latency probe (last/min/avg/max RTT + tier) with a
+ * "Probe Now" button. Reached from the /peer detail card's ⏱ Latency button.
+ * Pass editId to update an existing message (probe-now) instead of replying anew.
+ */
+export async function showLatencyStats(ctx: BotContext, asn: number, editId?: number) {
     const nodesMap = await getNodes();
     const nodeIds = Array.from(nodesMap.keys()).sort();
     if (nodeIds.length === 0) {
@@ -274,7 +251,12 @@ async function showLatencyStats(ctx: BotContext, asn: number) {
         text = LATENCY_NO_DATA.replace('{asn}', String(asn));
     }
 
-    await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    if (editId) {
+        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: keyboard }); }
+        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    }
 }
 
 // Type definitions

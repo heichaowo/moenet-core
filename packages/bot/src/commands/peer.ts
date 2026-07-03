@@ -8,6 +8,7 @@ import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../serv
 import { DIVIDER } from '../templates';
 import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
 import { isAdmin } from '../guards';
+import { showLatencyStats } from './community';
 import { evaluatePeerRequest, endpointSyncIssue } from './peer/approvalCard';
 
 // Import from new peer module
@@ -207,6 +208,7 @@ async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
         .text('📊 Status', `peer:st:${uuid}`)
         .text('🔄 Restart', `peer:rs:${uuid}`)
         .row()
+        .text('⏱ Latency', `peer:lat:${s.asn}`)
         .text('🔙 Peers', 'peer:list');
 
     const render = (pm?: 'Markdown') =>
@@ -530,6 +532,11 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
     });
     // Page-indicator button — no-op (just clears the loading spinner).
     bot.callbackQuery('peer:all:noop', async (ctx) => { await ctx.answerCallbackQuery(); });
+    // ⏱ Latency button on the peer detail card → WireGuard RTT probe (was /latency).
+    bot.callbackQuery(/^peer:lat:(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery('⏱ Probing…');
+        await showLatencyStats(ctx, parseInt(ctx.match[1]!, 10));
+    });
     bot.callbackQuery('peer:byasn', async (ctx) => {
         if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
         ctx.session.peerAsnPrompt = 'view';

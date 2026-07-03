@@ -88,10 +88,8 @@ export const START_COMMANDS = `📋 *Commands 指令列表*
 ━━━━━━━━━━━━━━━━
 📊 *Statistics 统计*
 /rank — Global ranking 排行榜
-/stats — User statistics 用户统计
-/peerlist — Peer list 连接列表
+/stats — Network / ASN stats 网络统计
 /community — BGP communities 社区标记
-/latency — Latency probe 延迟探测
 /flaps — Route flap history 路由抖动`;
 
 // ==============================================================================
