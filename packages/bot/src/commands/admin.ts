@@ -2845,10 +2845,10 @@ async function notifyMigratedUsers(
 				`📍 To 新节点: \`${toName}\`\n\n` +
 				`⚠️ *Action Required:*\n` +
 				`Please update your WireGuard Endpoint to the new node's address.\n` +
-				`Use \`/info\` to view your updated peer configuration.\n\n` +
+				`Use \`/peer\` to view your updated peer configuration.\n\n` +
 				`⚠️ *需要操作:*\n` +
 				`请更新您的 WireGuard Endpoint 为新节点地址。\n` +
-				`使用 \`/info\` 查看更新后的 Peer 配置。`;
+				`使用 \`/peer\` 查看更新后的 Peer 配置。`;
 
 			try {
 				await ctx.api.sendMessage(target.telegramId, message, {
