@@ -54,11 +54,8 @@ Configure your WireGuard interface and BIRD accordingly.
 
 ### Step 4: Verify
 
-```
-/status
-```
-
-Check that your WireGuard tunnel is up and BGP session is established.
+Open `/peer`, tap your peer, then **📊 Status** to check that your WireGuard
+tunnel is up and the BGP session is established.
 
 ## For Operators — Deploying a Node
 
@@ -115,11 +112,11 @@ systemctl enable --now moenet-agent
 | Command | Description |
 |---------|-------------|
 | `/help` | Show all available commands |
-| `/info` | View your current peers |
-| `/modify` | Change peer settings (endpoint, MTU) |
-| `/remove` | Delete a peer |
-| `/restart` | Restart WireGuard tunnel |
+| `/peer` | **Everything peering** — view/create peers and, on a peer's detail card, Modify · Delete · Status · Restart (all inline) |
 | `/ping <target>` | Ping from MoeNet nodes |
 | `/trace <target>` | Traceroute from nodes |
 | `/whois <query>` | DN42 WHOIS lookup |
 | `/route <prefix>` | BGP route lookup |
+
+> Peer management used to be split across `/info` `/modify` `/remove` `/restart`
+> `/status`; those still work but are no longer in the menu — use `/peer`.

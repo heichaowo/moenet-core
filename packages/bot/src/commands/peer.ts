@@ -8,6 +8,7 @@ import { validateIpOwnership, isLinkLocal, isDN42ULA, isDN42IPv4 } from '../serv
 import { DIVIDER } from '../templates';
 import { PeeringStatus, STATUS_LABELS } from '../peeringStatus';
 import { isAdmin } from '../guards';
+import { showLatencyStats } from './community';
 import { evaluatePeerRequest, endpointSyncIssue } from './peer/approvalCard';
 
 // Import from new peer module
@@ -207,13 +208,22 @@ async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
         .text('📊 Status', `peer:st:${uuid}`)
         .text('🔄 Restart', `peer:rs:${uuid}`)
         .row()
+        .text('⏱ Latency', `peer:lat:${s.routerName || s.router}:${s.asn}`)
         .text('🔙 Peers', 'peer:list');
 
-    if (editId) {
-        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
-        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
-    } else {
-        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    const render = (pm?: 'Markdown') =>
+        editId
+            ? ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: pm, reply_markup: kb })
+            : ctx.reply(text, { parse_mode: pm, reply_markup: kb });
+    try {
+        await render('Markdown');
+    } catch (e) {
+        if (e instanceof Error && e.message.includes('not modified')) return;
+        // A peer field (endpoint/contact/lastError/pubkey) can contain characters
+        // that break Markdown parsing (400 "can't parse entities"), which would
+        // otherwise make the whole detail card silently fail — the symptom admins
+        // hit browsing arbitrary network peers. Fall back to plain text.
+        await render(undefined);
     }
 }
 
@@ -237,18 +247,41 @@ async function showAdminPeerPanel(ctx: BotContext, editId?: number) {
 }
 
 /** List every session across the network as an inline list (admin). */
-async function showAllSessions(ctx: BotContext, editId?: number) {
+const ALL_SESSIONS_PAGE = 18; // sessions per page (keeps the button list scrollable)
+
+async function showAllSessions(ctx: BotContext, editId?: number, page = 0) {
     const result = await apiRequest('/admin', 'POST', { action: 'enumSessions' }, config.apiToken);
     const sessions = (result.data?.sessions || []) as Array<{ uuid: string; router: string; routerName?: string; status: number; asn: number }>;
-    sessions.sort((a, b) => a.asn - b.asn);
+    // Sort by ASN so each ASN's sessions are grouped together, then by node name.
+    sessions.sort((a, b) => a.asn - b.asn || (a.routerName || a.router).localeCompare(b.routerName || b.router));
 
-    let text = `📋 *All Sessions 所有会话* (${sessions.length})\n\n`;
+    const asnCount = new Set(sessions.map((s) => s.asn)).size;
+    const totalPages = Math.max(1, Math.ceil(sessions.length / ALL_SESSIONS_PAGE));
+    const p = Math.min(Math.max(page, 0), totalPages - 1);
+    const pageItems = sessions.slice(p * ALL_SESSIONS_PAGE, p * ALL_SESSIONS_PAGE + ALL_SESSIONS_PAGE);
+
+    const text =
+        `📋 *All Sessions 所有会话*\n` +
+        `${sessions.length} sessions · ${asnCount} ASNs · 第 ${p + 1}/${totalPages} 页`;
+
     const kb = new InlineKeyboard();
-    const shown = sessions.slice(0, 90); // Telegram inline-button ceiling
-    for (const s of shown) {
-        kb.text(`${peerDot(s.status)} AS${s.asn} · ${s.routerName || s.router}`, `peer:v:${s.uuid}`).row();
+    // Group visually: the first row of each ASN shows the ASN; its other sessions
+    // are indented under it.
+    let lastAsn = -1;
+    for (const s of pageItems) {
+        const node = s.routerName || s.router;
+        const label = s.asn !== lastAsn
+            ? `AS${s.asn} · ${peerDot(s.status)} ${node}`
+            : `      ${peerDot(s.status)} ${node}`;
+        lastAsn = s.asn;
+        kb.text(label, `peer:v:${s.uuid}`).row();
     }
-    if (sessions.length > shown.length) text += `_(showing first ${shown.length})_\n`;
+    if (totalPages > 1) {
+        if (p > 0) kb.text('◀️ 上一页', `peer:all:${p - 1}`);
+        kb.text(`${p + 1}/${totalPages}`, 'peer:all:noop');
+        if (p < totalPages - 1) kb.text('下一页 ▶️', `peer:all:${p + 1}`);
+        kb.row();
+    }
     kb.text('🔙 Panel 面板', 'peer:panel');
     if (editId) {
         try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
@@ -472,7 +505,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
     });
     bot.callbackQuery(/^peer:v:(.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery();
-        await showPeerDetail(ctx, ctx.match[1]!, ctx.callbackQuery.message?.message_id);
+        try {
+            await showPeerDetail(ctx, ctx.match[1]!, ctx.callbackQuery.message?.message_id);
+        } catch (e) {
+            console.error('[peer:v] showPeerDetail failed:', e);
+            await ctx.reply('❌ Failed to load peer detail.\n加载详情失败。');
+        }
     });
     bot.callbackQuery('peer:new', async (ctx) => {
         await ctx.answerCallbackQuery();
@@ -485,10 +523,20 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         await ctx.answerCallbackQuery();
         await showAdminPeerPanel(ctx, ctx.callbackQuery.message?.message_id);
     });
-    bot.callbackQuery('peer:all', async (ctx) => {
+    // peer:all (page 0) and peer:all:<page> (pagination nav).
+    bot.callbackQuery(/^peer:all(?::(\d+))?$/, async (ctx) => {
         if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
         await ctx.answerCallbackQuery();
-        await showAllSessions(ctx, ctx.callbackQuery.message?.message_id);
+        const page = ctx.match?.[1] ? parseInt(ctx.match[1], 10) : 0;
+        await showAllSessions(ctx, ctx.callbackQuery.message?.message_id, page);
+    });
+    // Page-indicator button — no-op (just clears the loading spinner).
+    bot.callbackQuery('peer:all:noop', async (ctx) => { await ctx.answerCallbackQuery(); });
+    // ⏱ Latency button on the peer detail card → WireGuard RTT probe (was /latency).
+    // Carries the peer's node so we probe where the peer actually lives.
+    bot.callbackQuery(/^peer:lat:([^:]+):(\d+)$/, async (ctx) => {
+        await ctx.answerCallbackQuery('⏱ Probing…');
+        await showLatencyStats(ctx, parseInt(ctx.match[2]!, 10), ctx.match[1]!);
     });
     bot.callbackQuery('peer:byasn', async (ctx) => {
         if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
@@ -1435,11 +1483,13 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             const sessions: Array<{ uuid: string; router: string; routerName?: string; status: number; ipv6?: string; endpoint?: string; serverEndpoint?: string; serverWgKey?: string }> = result.data?.sessions || [];
 
             if (sessions.length === 0) {
+                const emptyKb = targetAsn === ctx.session.asn
+                    ? new InlineKeyboard().text('➕ New Peer', 'peer:new')
+                    : undefined;
                 await ctx.reply(
                     `📊 *Peer Info for AS${targetAsn}*\n\n` +
-                    `No peers found.\n没有 Peer\n\n` +
-                    `Use /peer to create one.\n使用 /peer 创建。`,
-                    { parse_mode: 'Markdown' }
+                    `No peers found.\n没有 Peer`,
+                    { parse_mode: 'Markdown', reply_markup: emptyKb }
                 );
                 return;
             }
@@ -1540,7 +1590,7 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
 
             const keyboard = new InlineKeyboard()
                 .text('🔄 Refresh 刷新', `info:refresh:${targetAsn}`)
-                .text('🔧 Modify 修改', 'info:modify');
+                .text('🔧 Modify 修改', `info:modify:${targetAsn}`);
 
             await ctx.reply(message, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (error) {
@@ -1566,38 +1616,25 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         await fetchAndDisplayInfo(ctx, targetAsn, useAdminApi);
     });
 
-    bot.callbackQuery('info:modify', async (ctx) => {
-        await ctx.answerCallbackQuery();
-        await ctx.reply('Use /modify to modify a peer\n使用 /modify 修改 Peer');
-    });
+    // Modify button on the Peer Info card → open the same inline peer picker
+    // as /modify (no "type /modify" dead-end). ASN is carried on the button.
+    bot.callbackQuery(/^info:modify:(\d+)$/, async (ctx) => {
+        const targetAsn = parseInt(ctx.match[1]!, 10);
 
-    /**
-     * /modify - Modify existing peer
-     */
-    bot.command('modify', async (ctx) => {
-        // Check if admin specifying ASN
-        const args = ctx.match?.trim().split(/\s+/) || [];
-        let targetAsn = ctx.session.asn;
-        let isAdminMode = false;
-
-        const username = ctx.from?.username?.toLowerCase();
-        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
-        const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
-
-        if (args[0] && isAsnInput(args[0])) {
-            if (!isAdmin) {
-                await ctx.reply('❌ Only admin can modify other ASN peers\n只有管理员可以修改其他 ASN 的 Peer');
-                return;
-            }
-            targetAsn = normalizeAsn(args[0]);
-            isAdminMode = true;
-        }
-
-        if (!targetAsn) {
-            await ctx.reply('❌ Please /login first.\n请先登录');
+        // Ownership: a non-admin may only modify their own ASN. Without this,
+        // a crafted info:modify:<other-asn> would enumerate another peer.
+        if (!isAdmin(ctx) && targetAsn !== ctx.session.asn) {
+            await ctx.answerCallbackQuery('❌ Not your ASN / 不是你的 ASN');
             return;
         }
 
+        await ctx.answerCallbackQuery();
+        await presentModifyPeerPicker(ctx, targetAsn);
+    });
+
+    // Shared inline "pick a peer to modify" flow, used by both /modify and the
+    // Peer Info card's Modify button so neither dead-ends into "type /modify".
+    async function presentModifyPeerPicker(ctx: BotContext, targetAsn: number) {
         try {
             // Always use the admin API: the bot holds the admin token, while
             // /session needs a per-user JWT the bot never has (caused "Unauthorized"
@@ -1633,6 +1670,34 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             console.error('[Modify] Error:', error);
             await ctx.reply('❌ Failed to fetch peers.');
         }
+    }
+
+    /**
+     * /modify - Modify existing peer
+     */
+    bot.command('modify', async (ctx) => {
+        // Check if admin specifying ASN
+        const args = ctx.match?.trim().split(/\s+/) || [];
+        let targetAsn = ctx.session.asn;
+
+        const username = ctx.from?.username?.toLowerCase();
+        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
+        const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
+
+        if (args[0] && isAsnInput(args[0])) {
+            if (!isAdmin) {
+                await ctx.reply('❌ Only admin can modify other ASN peers\n只有管理员可以修改其他 ASN 的 Peer');
+                return;
+            }
+            targetAsn = normalizeAsn(args[0]);
+        }
+
+        if (!targetAsn) {
+            await ctx.reply('❌ Please /login first.\n请先登录');
+            return;
+        }
+
+        await presentModifyPeerPicker(ctx, targetAsn);
     });
 
     /**
@@ -2246,48 +2311,9 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
             return;
         }
 
-        try {
-            const result = await apiRequest('/admin', 'POST', {
-                action: 'enumSessions',
-                asn: targetAsn,
-            }, config.apiToken);
-
-            if (result.code !== 0) {
-                await ctx.reply(`❌ Error: ${result.message}`);
-                return;
-            }
-
-            const sessions: Array<{
-                uuid: string;
-                router: string;
-                routerName?: string;
-                status: number;
-            }> = result.data?.sessions || [];
-
-            if (sessions.length === 0) {
-                await ctx.reply(
-                    `📋 *Peers for AS${targetAsn}*\n\n` +
-                    `No peers found. Use /peer to create one.\n` +
-                    `没有 Peer，使用 /peer 创建。`,
-                    { parse_mode: 'Markdown' }
-                );
-                return;
-            }
-
-            let message = `📋 *Peers for AS${targetAsn}* (${sessions.length})\n\n`;
-
-            for (const s of sessions) {
-                const displayName = s.routerName || s.router;
-                const status = STATUS_LABELS[s.status] || `❓ Unknown(${s.status})`;
-                message += `• \`${displayName}\` — ${status}\n`;
-            }
-
-            message += `\nUse /info for details, /modify to change, /remove to delete.`;
-
-            await ctx.reply(message, { parse_mode: 'Markdown' });
-        } catch (error) {
-            console.error('[Peers] Error:', error);
-            await ctx.reply('❌ Failed to fetch peers.');
-        }
+        // Unified inline list (buttons → detail card), same as /peer. No text
+        // command hints — every action is a tap. adminMode when viewing another
+        // ASN (hides ➕ New Peer, which only makes sense for your own ASN).
+        await showPeerList(ctx, targetAsn, targetAsn !== ctx.session.asn);
     });
 }

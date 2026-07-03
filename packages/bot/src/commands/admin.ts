@@ -4,17 +4,11 @@ import { apiRequest } from "../api";
 import config from "../config";
 import { isAdmin } from "../guards";
 import type { BotContext } from "../index";
+import { escapeMarkdown } from "../markdown";
 import { getNodes, getAgentEndpoint } from "../providers/nodes";
 import { fetchContacts } from "../services/dn42Registry";
 import { DIVIDER } from "../templates";
 import { calculatePort, isAsnInput, normalizeAsn } from "./peer/validators";
-
-/**
- * Escape Telegram Markdown v1 special characters in user-supplied text.
- */
-function escapeMarkdown(text: string): string {
-	return text.replace(/([*_`[])/g, "\\$1");
-}
 
 // =============================================================================
 // Shared Constants
@@ -2434,6 +2428,9 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 
 		await executeDirectNotify(ctx, flow.asns, flow.message);
 		ctx.session.notifyFlow = undefined;
+		// executeDirectNotify posts its report as a new message; drop the
+		// now-redundant "Sending…" placeholder so it doesn't linger as an orphan.
+		await ctx.deleteMessage().catch(() => {});
 	});
 
 	// ntf:cancel → abort
@@ -2845,10 +2842,10 @@ async function notifyMigratedUsers(
 				`📍 To 新节点: \`${toName}\`\n\n` +
 				`⚠️ *Action Required:*\n` +
 				`Please update your WireGuard Endpoint to the new node's address.\n` +
-				`Use \`/info\` to view your updated peer configuration.\n\n` +
+				`Use \`/peer\` to view your updated peer configuration.\n\n` +
 				`⚠️ *需要操作:*\n` +
 				`请更新您的 WireGuard Endpoint 为新节点地址。\n` +
-				`使用 \`/info\` 查看更新后的 Peer 配置。`;
+				`使用 \`/peer\` 查看更新后的 Peer 配置。`;
 
 			try {
 				await ctx.api.sendMessage(target.telegramId, message, {

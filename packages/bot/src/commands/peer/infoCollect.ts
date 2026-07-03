@@ -63,15 +63,19 @@ export interface StepResult {
 // ============== API Helper ==============
 
 async function apiRequest(endpoint: string, method = 'POST', body?: unknown): Promise<APIResponse> {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': config.apiToken ? `Bearer ${config.apiToken}` : '',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<APIResponse>;
+    try {
+        const response = await fetch(`${config.apiUrl}${endpoint}`, {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': config.apiToken ? `Bearer ${config.apiToken}` : '',
+            },
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        return (await response.json()) as APIResponse;
+    } catch (e) {
+        return { code: -1, message: `Request failed: ${(e as Error).message}` };
+    }
 }
 
 // ============== Step Functions ==============

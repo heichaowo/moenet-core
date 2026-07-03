@@ -908,16 +908,30 @@ async function getSessionAdmin(
 		);
 	}
 
-	// Get router name
+	// Get router name + server-side connection info (the node endpoint the peer
+	// dials). enumSessions computes these; getSession must too, otherwise the
+	// /peer detail card shows "Server: —".
 	const router = await models.routers.findOne({
 		where: { uuid: session.get("router") as string },
 	});
 	const routerName = router?.get("name") || session.get("router");
 
+	const listenPort = getListenPort(session.get("asn") as number);
+	const publicIp = router?.get("publicIp") as string | null;
+	const publicIpv6 = router?.get("publicIpv6") as string | null;
+	let serverEndpoint: string | null = null;
+	if (publicIp) {
+		serverEndpoint = `${publicIp}:${listenPort}`;
+	} else if (publicIpv6) {
+		serverEndpoint = `[${publicIpv6}]:${listenPort}`;
+	}
+
 	return success(c, {
 		session: {
 			...session.get(),
 			routerName,
+			serverEndpoint,
+			serverWgKey: (router?.get("wgPublicKey") as string | null) ?? null,
 		},
 	});
 }

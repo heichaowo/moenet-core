@@ -93,9 +93,11 @@ See `.env.example` for all options.
 | `/start` | Show welcome message |
 | `/help` | List all commands |
 | `/login` | Authenticate with DN42 ASN (GPG / SSH / Email) |
-| `/peer` | Peer hub — inline list of your peers → detail card (✏️ Modify · 🗑 Delete · 📊 Status · 🔄 Restart) + ➕ New Peer |
+| `/peer` | **The single entry for all peering** — inline list of your peers → detail card (✏️ Modify · 🗑 Delete · 📊 Status · 🔄 Restart) + ➕ New Peer. Every action is a button tap; nothing to type. |
 | `/node` | Browse nodes (inline list → details) |
-| `/info` `/modify` `/remove` `/status` `/restart` | Per-peer commands (also available as buttons on the `/peer` detail card) |
+
+> `/info` `/modify` `/remove` `/status` `/restart` still work as legacy aliases,
+> but they're no longer in the command menu — every action now lives inside `/peer`.
 
 ### Network Tools
 

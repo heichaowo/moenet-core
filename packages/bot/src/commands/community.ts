@@ -3,9 +3,30 @@ import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
-import { normalizeAsn } from './peer/validators';
+import { escapeMarkdown } from '../markdown';
 
 const ERROR_NOT_LOGGED_IN = '❌ Please /login first\n请先登录';
+
+/**
+ * Node-selection keyboard for /community. Labels each button with the node id
+ * (unique + short) plus its location so two nodes in the same city (hk1/hk2)
+ * stay distinguishable instead of both showing a truncated "Hong Kong".
+ */
+function buildCommunityKeyboard(
+    nodesMap: Map<string, { location?: string }>,
+    selectedId: string,
+): InlineKeyboard {
+    const kb = new InlineKeyboard();
+    const ids = Array.from(nodesMap.keys()).sort();
+    ids.forEach((n, i) => {
+        const loc = nodesMap.get(n)?.location;
+        const label = loc ? `${n} · ${loc}` : n;
+        kb.text(n === selectedId ? `✅ ${label}` : label, `community:${n}`);
+        // 2 per row so labels aren't squeezed into unreadable slivers.
+        if ((i + 1) % 2 === 0) kb.row();
+    });
+    return kb;
+}
 
 /**
  * Call agent API using getAgentEndpoint for node resolution
@@ -24,7 +45,10 @@ async function callAgentApi(nodeId: string, method: string, path: string, body?:
             body: body ? JSON.stringify(body) : undefined,
             signal: AbortSignal.timeout(5000),
         });
-        return response.json();
+        if (!response.ok) return null;
+        // await so a JSON-parse rejection is caught here (returns null) instead of
+        // escaping the missing-await return and crashing the calling handler.
+        return await response.json();
     } catch (error) {
         console.error(`[Agent] API call failed: ${error}`);
         return null;
@@ -86,13 +110,13 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         const nodeId = nodeIds[0]!;
         const nodeName = nodesMap.get(nodeId)?.location || nodeId;
 
-        await ctx.reply(`📊 Fetching community stats from ${nodeName}...`);
+        const loading = await ctx.reply(`📊 Fetching community stats from ${nodeName}...`);
 
         try {
             const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
             if (!stats) {
-                await ctx.reply('❌ Failed to get community stats.\n无法获取 community 统计。');
+                await ctx.api.editMessageText(loading.chat.id, loading.message_id, '❌ Failed to get community stats.\n无法获取 community 统计。');
                 return;
             }
 
@@ -105,7 +129,7 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
                 .join('\n') || '    (无数据 No data)';
 
             const text = COMMUNITY_STATS
-                .replace('{node}', nodeName)
+                .replace('{node}', escapeMarkdown(nodeName))
                 .replace('{t0}', String(latency[0] || 0))
                 .replace('{t1}', String(latency[1] || 0))
                 .replace('{t2}', String(latency[2] || 0))
@@ -116,17 +140,11 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
                 .replace('{regions}', regionsText)
                 .replace('{total}', String(stats.total_routes || 0));
 
-            // Node selection keyboard (sorted)
-            const keyboard = new InlineKeyboard();
-            nodeIds.forEach(n => {
-                const name = nodesMap.get(n)?.location || n;
-                keyboard.text(n === nodeId ? `✅ ${name}` : name, `community:${n}`);
-            });
-
-            await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+            const keyboard = buildCommunityKeyboard(nodesMap, nodeId);
+            await ctx.api.editMessageText(loading.chat.id, loading.message_id, text, { parse_mode: 'Markdown', reply_markup: keyboard });
         } catch (error) {
             console.error('[Community] Error:', error);
-            await ctx.reply(`❌ Error: ${(error as Error).message}`);
+            await ctx.api.editMessageText(loading.chat.id, loading.message_id, `❌ Error: ${(error as Error).message}`);
         }
     });
 
@@ -138,12 +156,11 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
         const nodesMap = await getNodes();
         const nodeName = nodesMap.get(nodeId)?.location || nodeId;
 
-        await ctx.answerCallbackQuery('Loading...');
-
         const stats = await callAgentApi(nodeId, 'GET', '/community') as CommunityStats | null;
 
         if (!stats) {
-            await ctx.answerCallbackQuery('Failed to load stats');
+            await ctx.answerCallbackQuery(`❌ ${nodeName}: no data`);
+            await ctx.editMessageText(`❌ Failed to load community stats from ${nodeName}.\n无法从该节点获取统计。`);
             return;
         }
 
@@ -156,7 +173,7 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             .join('\n') || '    (无数据 No data)';
 
         const text = COMMUNITY_STATS
-            .replace('{node}', nodeName)
+            .replace('{node}', escapeMarkdown(nodeName))
             .replace('{t0}', String(latency[0] || 0))
             .replace('{t1}', String(latency[1] || 0))
             .replace('{t2}', String(latency[2] || 0))
@@ -167,88 +184,53 @@ export function registerCommunityCommands(bot: Bot<BotContext>) {
             .replace('{regions}', regionsText)
             .replace('{total}', String(stats.total_routes || 0));
 
-        const nodeIds = Array.from(nodesMap.keys()).sort();
-        const keyboard = new InlineKeyboard();
-        nodeIds.forEach(n => {
-            const name = nodesMap.get(n)?.location || n;
-            keyboard.text(n === nodeId ? `✅ ${name}` : name, `community:${n}`);
-        });
-
-        await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+        const keyboard = buildCommunityKeyboard(nodesMap, nodeId);
+        try {
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+        } catch (e) {
+            // "not modified" (same node re-tapped) or a Markdown hiccup shouldn't
+            // look like a dead button — always give a toast, and fall back to plain.
+            if (!(e instanceof Error && e.message.includes('not modified'))) {
+                await ctx.editMessageText(text, { reply_markup: keyboard }).catch(() => {});
+            }
+        }
+        // Confirm which node loaded (the numbers can look identical across nodes,
+        // so without this a successful switch reads as "nothing happened").
+        await ctx.answerCallbackQuery(`📊 ${nodeName}`);
     });
 
-    /**
-     * /latency [asn] - Show latency probe results
-     */
-    bot.command('latency', async (ctx) => {
-        if (!ctx.session.asn) {
-            await ctx.reply(ERROR_NOT_LOGGED_IN);
-            return;
-        }
-
-        const asnRaw = ctx.match?.trim();
-        const asn = asnRaw ? normalizeAsn(asnRaw) : ctx.session.asn;
-
-        if (!asn || isNaN(asn)) {
-            await ctx.reply('用法: /latency [ASN]\n例如: /latency 4242421234');
-            return;
-        }
-
-        await showLatencyStats(ctx, asn);
-    });
-
-    // Handle probe now button
-    bot.callbackQuery(/^probe_now:(\d+)$/, async (ctx) => {
-        const asnStr = ctx.match?.[1];
-        if (!asnStr) return;
+    // Handle probe now button — probes on the peer's own node (node:asn).
+    bot.callbackQuery(/^probe_now:([^:]+):(\d+)$/, async (ctx) => {
+        const node = ctx.match?.[1];
+        const asnStr = ctx.match?.[2];
+        if (!node || !asnStr) return;
         const asn = parseInt(asnStr);
 
-        await ctx.answerCallbackQuery('Starting probe...');
-
-        // Get first node from provider
-        const nodesMap = await getNodes();
-        const nodeIds = Array.from(nodesMap.keys()).sort();
-        if (nodeIds.length === 0) {
-            await ctx.answerCallbackQuery('No nodes available');
-            return;
-        }
-
-        const firstNode = nodeIds[0]!;
-
-        const result = await callAgentApi(firstNode, 'POST', '/probe/now', { asn }) as ProbeResult | null;
+        const result = await callAgentApi(node, 'POST', '/probe/now', { asn }) as ProbeResult | null;
 
         if (result?.success) {
-            await ctx.answerCallbackQuery(`✅ Probe: ${result.rtt_ms?.toFixed(1)}ms (Tier ${result.latency_tier})`);
-            await showLatencyStats(ctx, asn);
+            await ctx.answerCallbackQuery(`✅ ${result.rtt_ms?.toFixed(1)}ms (Tier ${result.latency_tier})`);
+            // Edit the existing latency message in place instead of sending a new
+            // one on every probe (was flooding the chat).
+            await showLatencyStats(ctx, asn, node, ctx.callbackQuery.message?.message_id);
         } else {
             await ctx.answerCallbackQuery(`❌ Probe failed: ${result?.error || 'Unknown error'}`);
         }
     });
-
-    // Handle latency selection
-    bot.callbackQuery(/^latency:(\d+)$/, async (ctx) => {
-        const asnStr = ctx.match?.[1];
-        if (!asnStr) return;
-        const asn = parseInt(asnStr);
-        await ctx.answerCallbackQuery();
-        await showLatencyStats(ctx, asn);
-    });
 }
 
-async function showLatencyStats(ctx: BotContext, asn: number) {
-    const nodesMap = await getNodes();
-    const nodeIds = Array.from(nodesMap.keys()).sort();
-    if (nodeIds.length === 0) {
-        await ctx.reply('❌ No nodes available.');
-        return;
-    }
-
-    const firstNode = nodeIds[0]!;
-
-    const stats = await callAgentApi(firstNode, 'POST', '/probe/stats', { asn }) as ProbeStats | null;
+/**
+ * Show a peer's WireGuard latency probe (last/min/avg/max RTT + tier) with a
+ * "Probe Now" button. Reached from the /peer detail card's ⏱ Latency button.
+ * Pass editId to update an existing message (probe-now) instead of replying anew.
+ */
+export async function showLatencyStats(ctx: BotContext, asn: number, node: string, editId?: number) {
+    // Probe on the node the peer actually lives on (not an arbitrary first node),
+    // otherwise the peer isn't found there and the probe always returns nothing.
+    const stats = await callAgentApi(node, 'POST', '/probe/stats', { asn }) as ProbeStats | null;
 
     const keyboard = new InlineKeyboard()
-        .text('🔄 立即探测 Probe Now', `probe_now:${asn}`);
+        .text('🔄 立即探测 Probe Now', `probe_now:${node}:${asn}`);
 
     let text: string;
     if (stats?.last_rtt) {
@@ -265,7 +247,12 @@ async function showLatencyStats(ctx: BotContext, asn: number) {
         text = LATENCY_NO_DATA.replace('{asn}', String(asn));
     }
 
-    await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    if (editId) {
+        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: keyboard }); }
+        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    }
 }
 
 // Type definitions

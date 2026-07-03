@@ -4,6 +4,7 @@ import type { BotContext } from '../index';
 import config from '../config';
 import { apiRequest } from '../api';
 import { isAdmin } from '../guards';
+import { escapeMarkdown } from '../markdown';
 import { normalizeAsn } from './peer/validators';
 
 
@@ -46,7 +47,7 @@ export function registerBlockCommands(bot: Bot<BotContext>) {
                 return;
             }
 
-            const reasonText = reason ? `\nReason: ${reason}` : '';
+            const reasonText = reason ? `\nReason: ${escapeMarkdown(reason)}` : '';
             await ctx.reply(
                 `🚫 *AS${asnNumber} Blocked*\nASN 已加入黑名单${reasonText}`,
                 { parse_mode: 'Markdown' }
@@ -195,7 +196,7 @@ async function showBlocklist(ctx: BotContext, editMessageId?: number) {
         const keyboard = new InlineKeyboard();
 
         blocklist.forEach((b: BlockedAsn, i: number) => {
-            const reason = b.reason ? ` - ${b.reason}` : '';
+            const reason = b.reason ? ` - ${escapeMarkdown(b.reason)}` : '';
             message += `${i + 1}. AS${b.asn}${reason}\n`;
 
             keyboard.text(`🔓 ${i + 1}`, `unblock:${b.asn}`);

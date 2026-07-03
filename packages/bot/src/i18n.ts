@@ -71,12 +71,8 @@ export const START_COMMANDS = `📋 *Commands 指令列表*
 
 ━━━━━━━━━━━━━━━━
 🔗 *Peering 连接*
-/peer — Create new peer 建立连接
-/modify — Modify peer 修改连接
-/remove — Remove peer 删除连接
-/info — Peer info & status 连接状态
-/status — WG/BGP live status 实时状态
-/restart — Restart tunnel 重启隧道
+/peer — 我的连接总入口 · 新建 / 改 / 删 / 状态 / 重启
+        My peers — one entry, everything inline (tap the buttons)
 
 ━━━━━━━━━━━━━━━━
 🛠️ *Tools 工具*
@@ -92,10 +88,8 @@ export const START_COMMANDS = `📋 *Commands 指令列表*
 ━━━━━━━━━━━━━━━━
 📊 *Statistics 统计*
 /rank — Global ranking 排行榜
-/stats — User statistics 用户统计
-/peerlist — Peer list 连接列表
+/stats — Network / ASN stats 网络统计
 /community — BGP communities 社区标记
-/latency — Latency probe 延迟探测
 /flaps — Route flap history 路由抖动`;
 
 // ==============================================================================

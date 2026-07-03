@@ -4,6 +4,7 @@ import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
 import { lookupWhois, formatWhoisResult, getWhoisAttr, fetchContacts } from '../services/dn42Registry';
+import { codeSafe } from '../markdown';
 import { normalizeAsn, isAsnInput } from './peer/validators';
 
 /**
@@ -196,8 +197,10 @@ async function buildNodeKeyboard(command: string, target: string, currentNode = 
 }
 
 export function registerToolsCommands(bot: Bot<BotContext>) {
-    // Handle node selection callbacks
-    bot.callbackQuery(/^tool:(\w+):([^:]+):(\w+)$/, async (ctx) => {
+    // Handle node selection callbacks. Target may itself contain colons (host:port
+    // for tcping, IPv6 addresses), so match it greedily and take the LAST
+    // colon-delimited segment as the node id (node names allow hyphens too).
+    bot.callbackQuery(/^tool:(\w+):(.+):([^:]+)$/, async (ctx) => {
         const match = ctx.match;
         const command = match?.[1];
         const target = match?.[2];
@@ -439,12 +442,16 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
      * /whois <query> - WHOIS lookup using Burble REST API
      */
     bot.command('whois', async (ctx) => {
-        const query = ctx.match?.trim();
+        const raw = ctx.match?.trim();
 
-        if (!query) {
+        if (!raw) {
             await ctx.reply('用法: /whois <ASN/IP/name>\n例如: /whois 998, AS4242420998, 172.23.0.80');
             return;
         }
+
+        // Normalize short ASN forms (998 / 0998 / AS4242420998 → AS4242420998) so
+        // whois hits the real registry object. IPs and names pass through as-is.
+        const query = isAsnInput(raw) ? `AS${normalizeAsn(raw)}` : raw;
 
         try {
             const result = await lookupWhois(query);
@@ -497,10 +504,10 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
         await ctx.reply(
             `🔍 *DNS Query*\n\n` +
-            `Domain: \`${domain}\`\n` +
+            `Domain: \`${codeSafe(domain)}\`\n` +
             `Type: \`${recordType}\`\n` +
             `Server: \`anycast.baka.dn42\`\n\n` +
-            `\`\`\`\n${result || 'No records found'}\n\`\`\``,
+            `\`\`\`\n${codeSafe(result || 'No records found')}\n\`\`\``,
             { parse_mode: 'Markdown' }
         );
     });
@@ -524,7 +531,7 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
 
             if (contacts.length > 0) {
                 await ctx.reply(
-                    `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${contacts.join('\n')}\n\`\`\``,
+                    `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${codeSafe(contacts.join('\n'))}\n\`\`\``,
                     { parse_mode: 'Markdown' }
                 );
             } else {
@@ -539,7 +546,7 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
                 }
                 if (localContacts.length > 0) {
                     await ctx.reply(
-                        `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${localContacts.join('\n')}\n\`\`\``,
+                        `📞 *NOC Contacts for AS${asn}*\n\n\`\`\`\n${codeSafe(localContacts.join('\n'))}\n\`\`\``,
                         { parse_mode: 'Markdown' }
                     );
                 } else {

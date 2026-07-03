@@ -127,22 +127,6 @@ export function registerModifyHandlers(
     });
 
     /**
-     * Handle info:status callback
-     */
-    bot.callbackQuery('info:status', async (ctx) => {
-        await ctx.answerCallbackQuery('Use /status command');
-        await ctx.reply('Use /status to check WG/BGP status\n使用 /status 查看状态');
-    });
-
-    /**
-     * Handle info:modify callback
-     */
-    bot.callbackQuery('info:modify', async (ctx) => {
-        await ctx.answerCallbackQuery('Use /modify command');
-        await ctx.reply('Use /modify to modify a peer\n使用 /modify 修改 Peer');
-    });
-
-    /**
      * Handle modify cancel
      */
     bot.callbackQuery('modify:cancel', async (ctx) => {

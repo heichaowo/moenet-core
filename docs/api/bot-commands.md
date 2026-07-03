@@ -18,17 +18,13 @@ Requires login (`/login` first).
 
 | Command | Description |
 |---------|-------------|
-| `/peer` | **Unified peer hub** — your peers as an inline list → tap one for a detail card with ✏️ Modify · 🗑 Delete · 📊 Status · 🔄 Restart, plus ➕ New Peer (inline creation wizard) |
+| `/peer` | **The single entry for all peering.** Your peers as an inline list → tap one for a detail card with ✏️ Modify · 🗑 Delete · 📊 Status · 🔄 Restart, plus ➕ New Peer (inline creation wizard). Every action is a button tap — no per-field commands to type. |
 | `/node` | Browse nodes (inline list → details). Everyone can view; admins also get add/edit/delete/bootstrap/maintenance/peers |
-| `/info` | Peer status & config (also on the `/peer` detail card) |
-| `/modify` | Modify a peer (also ✏️ on the `/peer` detail card) |
-| `/remove` | Delete a peer, with a confirmation code (also 🗑 on the `/peer` detail card) |
-| `/status` | WireGuard & BGP status (also 📊 on the `/peer` detail card) |
-| `/restart` | Restart a peer session (also 🔄 on the `/peer` detail card) |
 
-> The `/peer` detail card also shows a rejected peer's reason (`⚠️ Note`). The old
-> per-field commands above are kept as aliases; the inline `/peer` flow is the
-> recommended entry point.
+> `/info` `/modify` `/remove` `/status` `/restart` still work as **legacy
+> aliases** for muscle memory, but they've been removed from the command menu —
+> everything is reachable from inside `/peer`. The detail card also shows a
+> rejected peer's reason (`⚠️ Note`).
 
 ## Network Tools
 
@@ -66,10 +62,13 @@ review; hard blockers — unowned ULA/GUA IP, bogus/CN endpoint — still escala
 
 | Command | Description |
 |---------|-------------|
-| `/stats` | Network statistics |
+| `/stats` | Network statistics (`/stats <asn>` for DN42 MAP info) |
 | `/rank` | Node ranking by metrics |
-| `/community` | BGP community reference |
-| `/latency` | Inter-node latency matrix |
+| `/community` | Per-node BGP community / route stats |
+
+> A peer's WireGuard latency (RTT probe) is on the `/peer` detail card — tap
+> **⏱ Latency** (this replaced the old standalone `/latency` command). The old
+> `/peerlist` command was removed; use `/peer` for your peers.
 
 ## Peer Creation Flow
 

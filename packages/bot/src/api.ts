@@ -28,13 +28,21 @@ export async function apiRequest(
     body?: unknown,
     token?: string
 ): Promise<APIResponse> {
-    const response = await fetch(`${config.apiUrl}${endpoint}`, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : '',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return response.json() as Promise<APIResponse>;
+    try {
+        const response = await fetch(`${config.apiUrl}${endpoint}`, {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': token ? `Bearer ${token}` : '',
+            },
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        // await inside the try so a non-JSON body (proxy/error page, empty) is a
+        // caught rejection → normal error response, instead of escaping and
+        // crashing the calling handler (its buttons would look dead — the handler
+        // throws before answerCallbackQuery).
+        return (await response.json()) as APIResponse;
+    } catch (e) {
+        return { code: -1, message: `Request failed: ${(e as Error).message}` };
+    }
 }

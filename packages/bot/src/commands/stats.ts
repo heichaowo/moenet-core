@@ -19,7 +19,7 @@ import { apiRequest } from '../api';
 import { getRanking, getAsnInfo, getNetworkStats } from '../services/iedonApi';
 import type { RankingEntry } from '../services/iedonApi';
 import { normalizeAsn, isAsnInput } from './peer/validators';
-import { PeeringStatus } from '../peeringStatus';
+import { escapeMarkdown } from '../markdown';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -44,7 +44,7 @@ function formatRankPage(ranking: RankingEntry[], page: number): string {
         else if (item.rank === 2) medal = '🥈 ';
         else if (item.rank === 3) medal = '🥉 ';
 
-        const name = item.name.length > 16 ? `${item.name.slice(0, 16)}…` : item.name;
+        const name = escapeMarkdown(item.name.length > 16 ? `${item.name.slice(0, 16)}…` : item.name);
         const highlight = item.asn === LOCAL_ASN ? ' ⭐' : '';
         lines.push(`${medal}\`${String(item.rank).padStart(3)}\` AS${item.asn} | ${name} | ${item.index}${highlight}`);
     }
@@ -183,86 +183,6 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
         }
     });
 
-    /**
-     * /peerlist [asn] — Peer list
-     *
-     * With ASN:  Show DN42 peers from iedon MAP
-     * No args:   Show user's MoeNet peers (requires login)
-     */
-    bot.command('peerlist', async (ctx) => {
-        const arg = ctx.match?.trim();
-
-        if (arg && isAsnInput(arg)) {
-            // DN42 global peer list from iedon
-            await showIedonPeerList(ctx, normalizeAsn(arg));
-            return;
-        }
-
-        // MoeNet local peer list (admin or user)
-        const username = ctx.from?.username?.toLowerCase();
-        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
-        const isAdmin = username === adminUsername || ctx.session.isAdmin === true;
-
-        try {
-            if (isAdmin) {
-                const result = await apiRequest('/admin', 'POST', { action: 'enumSessions' }, config.apiToken);
-
-                if (result.code !== 0) {
-                    await ctx.reply(`❌ Error: ${result.message}`);
-                    return;
-                }
-
-                const sessions = (result.data?.sessions ?? []).slice(0, 30);
-
-                if (sessions.length === 0) {
-                    await ctx.reply('📋 No peers in system.\n系统中没有 Peer');
-                    return;
-                }
-
-                let message = `📋 *All Peers (Admin View)*\n所有 Peer（管理员视图）\n\n`;
-                for (const s of sessions) {
-                    const statusIcon = s.status === PeeringStatus.ENABLED ? '✅' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '❌';
-                    message += `${statusIcon} \`AS${s.asn}\` @ ${s.router}\n`;
-                }
-                message += `\n_共 ${sessions.length} 个 Peer_`;
-
-                await ctx.reply(message, { parse_mode: 'Markdown' });
-            } else {
-                if (!ctx.session.asn) {
-                    await ctx.reply('❌ Please /login first.\n请先登录');
-                    return;
-                }
-
-                const result = await apiRequest('/admin', 'POST', {
-                    action: 'enumSessions',
-                    asn: ctx.session.asn,
-                }, config.apiToken);
-
-                if (result.code !== 0) {
-                    await ctx.reply(`❌ Error: ${result.message}`);
-                    return;
-                }
-
-                const sessions = result.data?.sessions ?? [];
-
-                if (sessions.length === 0) {
-                    await ctx.reply('📋 You have no peers.\n你没有 Peer 连接');
-                    return;
-                }
-
-                let message = `👥 *Your Peers (${sessions.length})*\n\n`;
-                sessions.forEach((s: { status: number; routerName?: string; router: string }, i: number) => {
-                    const statusIcon = s.status === PeeringStatus.ENABLED ? '🟢' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '🔴';
-                    message += `${i + 1}. ${statusIcon} ${s.routerName || s.router}\n`;
-                });
-
-                await ctx.reply(message, { parse_mode: 'Markdown' });
-            }
-        } catch (error) {
-            console.error('[Peerlist] Error:', error);
-            await ctx.reply('❌ Failed to fetch peer list.\n获取 Peer 列表失败。');
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +203,7 @@ async function showAsnStats(ctx: BotContext, asn: number) {
 
         const message =
             `📊 *AS${asn} Statistics*\n\n` +
-            `📛 Name: ${info.name}\n` +
+            `📛 Name: ${escapeMarkdown(info.name)}\n` +
             `👥 Peers: ${info.peerCount}\n` +
             `📈 Centrality: ${info.centrality}\n` +
             `📍 Closeness: ${info.closeness}\n` +
@@ -297,31 +217,3 @@ async function showAsnStats(ctx: BotContext, asn: number) {
     }
 }
 
-/**
- * Show DN42-wide peer list for an ASN from iedon MAP.
- */
-async function showIedonPeerList(ctx: BotContext, asn: number) {
-    try {
-        const info = await getAsnInfo(asn);
-
-        if (!info || info.peers.length === 0) {
-            await ctx.reply(`❌ No peer data for AS${asn}.\n未找到 AS${asn} 的 Peer 列表`);
-            return;
-        }
-
-        const peers = info.peers.slice(0, 20);
-        const peerList = peers.map((p) => `• \`AS${p}\``).join('\n');
-
-        const message =
-            `👥 *AS${asn} Peer List*\n` +
-            `${info.name} — ${info.peerCount} peers\n\n` +
-            `${peerList}\n\n` +
-            (info.peers.length > 20 ? `_…and ${info.peers.length - 20} more_\n\n` : '') +
-            `_Source: iedon MAP_`;
-
-        await ctx.reply(message, { parse_mode: 'Markdown' });
-    } catch (error) {
-        console.error(`[Peerlist] ASN ${asn} error:`, error);
-        await ctx.reply('❌ Failed to fetch peer list.\n获取 Peer 列表失败。');
-    }
-}
