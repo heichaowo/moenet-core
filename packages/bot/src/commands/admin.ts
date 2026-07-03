@@ -4,17 +4,11 @@ import { apiRequest } from "../api";
 import config from "../config";
 import { isAdmin } from "../guards";
 import type { BotContext } from "../index";
+import { escapeMarkdown } from "../markdown";
 import { getNodes, getAgentEndpoint } from "../providers/nodes";
 import { fetchContacts } from "../services/dn42Registry";
 import { DIVIDER } from "../templates";
 import { calculatePort, isAsnInput, normalizeAsn } from "./peer/validators";
-
-/**
- * Escape Telegram Markdown v1 special characters in user-supplied text.
- */
-function escapeMarkdown(text: string): string {
-	return text.replace(/([*_`[])/g, "\\$1");
-}
 
 // =============================================================================
 // Shared Constants

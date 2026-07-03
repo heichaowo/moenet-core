@@ -196,8 +196,10 @@ async function buildNodeKeyboard(command: string, target: string, currentNode = 
 }
 
 export function registerToolsCommands(bot: Bot<BotContext>) {
-    // Handle node selection callbacks
-    bot.callbackQuery(/^tool:(\w+):([^:]+):(\w+)$/, async (ctx) => {
+    // Handle node selection callbacks. Target may itself contain colons (host:port
+    // for tcping, IPv6 addresses), so match it greedily and take the LAST
+    // colon-delimited segment as the node id (node names allow hyphens too).
+    bot.callbackQuery(/^tool:(\w+):(.+):([^:]+)$/, async (ctx) => {
         const match = ctx.match;
         const command = match?.[1];
         const target = match?.[2];
