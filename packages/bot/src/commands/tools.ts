@@ -439,12 +439,16 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
      * /whois <query> - WHOIS lookup using Burble REST API
      */
     bot.command('whois', async (ctx) => {
-        const query = ctx.match?.trim();
+        const raw = ctx.match?.trim();
 
-        if (!query) {
+        if (!raw) {
             await ctx.reply('用法: /whois <ASN/IP/name>\n例如: /whois 998, AS4242420998, 172.23.0.80');
             return;
         }
+
+        // Normalize short ASN forms (998 / 0998 / AS4242420998 → AS4242420998) so
+        // whois hits the real registry object. IPs and names pass through as-is.
+        const query = isAsnInput(raw) ? `AS${normalizeAsn(raw)}` : raw;
 
         try {
             const result = await lookupWhois(query);

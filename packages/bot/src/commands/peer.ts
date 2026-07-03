@@ -209,11 +209,19 @@ async function showPeerDetail(ctx: BotContext, uuid: string, editId?: number) {
         .row()
         .text('🔙 Peers', 'peer:list');
 
-    if (editId) {
-        try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
-        catch (e) { if (!(e instanceof Error && e.message.includes('not modified'))) throw e; }
-    } else {
-        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    const render = (pm?: 'Markdown') =>
+        editId
+            ? ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: pm, reply_markup: kb })
+            : ctx.reply(text, { parse_mode: pm, reply_markup: kb });
+    try {
+        await render('Markdown');
+    } catch (e) {
+        if (e instanceof Error && e.message.includes('not modified')) return;
+        // A peer field (endpoint/contact/lastError/pubkey) can contain characters
+        // that break Markdown parsing (400 "can't parse entities"), which would
+        // otherwise make the whole detail card silently fail — the symptom admins
+        // hit browsing arbitrary network peers. Fall back to plain text.
+        await render(undefined);
     }
 }
 
@@ -472,7 +480,12 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
     });
     bot.callbackQuery(/^peer:v:(.+)$/, async (ctx) => {
         await ctx.answerCallbackQuery();
-        await showPeerDetail(ctx, ctx.match[1]!, ctx.callbackQuery.message?.message_id);
+        try {
+            await showPeerDetail(ctx, ctx.match[1]!, ctx.callbackQuery.message?.message_id);
+        } catch (e) {
+            console.error('[peer:v] showPeerDetail failed:', e);
+            await ctx.reply('❌ Failed to load peer detail.\n加载详情失败。');
+        }
     });
     bot.callbackQuery('peer:new', async (ctx) => {
         await ctx.answerCallbackQuery();
