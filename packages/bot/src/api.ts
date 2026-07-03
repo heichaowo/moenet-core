@@ -37,16 +37,11 @@ export async function apiRequest(
             },
             body: body ? JSON.stringify(body) : undefined,
         });
-        const text = await response.text();
-        try {
-            return JSON.parse(text) as APIResponse;
-        } catch {
-            // Non-JSON body (proxy/error page, empty). Return a normal error
-            // response instead of letting a parse rejection escape and crash the
-            // calling handler (its buttons would look dead — the handler throws
-            // before answerCallbackQuery).
-            return { code: -1, message: `HTTP ${response.status}: ${text.slice(0, 120) || 'empty response'}` };
-        }
+        // await inside the try so a non-JSON body (proxy/error page, empty) is a
+        // caught rejection → normal error response, instead of escaping and
+        // crashing the calling handler (its buttons would look dead — the handler
+        // throws before answerCallbackQuery).
+        return (await response.json()) as APIResponse;
     } catch (e) {
         return { code: -1, message: `Request failed: ${(e as Error).message}` };
     }
