@@ -39,9 +39,10 @@ function formatTime(timestampMs: number): string {
  */
 export function registerFlapCommands(bot: Bot<BotContext>) {
     bot.command('flaps', async (ctx) => {
-        // Admin check
-        const username = ctx.from?.username;
-        if (!username || username !== config.adminUsername.replace('@', '')) {
+        // Admin check (case-insensitive — Telegram usernames are case-insensitive)
+        const username = ctx.from?.username?.toLowerCase();
+        const adminUsername = config.adminUsername?.toLowerCase().replace('@', '');
+        if (!username || username !== adminUsername) {
             await ctx.reply('❌ This command is for admins only.\n此命令仅限管理员使用。');
             return;
         }

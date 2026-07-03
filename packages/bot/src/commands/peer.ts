@@ -245,18 +245,41 @@ async function showAdminPeerPanel(ctx: BotContext, editId?: number) {
 }
 
 /** List every session across the network as an inline list (admin). */
-async function showAllSessions(ctx: BotContext, editId?: number) {
+const ALL_SESSIONS_PAGE = 18; // sessions per page (keeps the button list scrollable)
+
+async function showAllSessions(ctx: BotContext, editId?: number, page = 0) {
     const result = await apiRequest('/admin', 'POST', { action: 'enumSessions' }, config.apiToken);
     const sessions = (result.data?.sessions || []) as Array<{ uuid: string; router: string; routerName?: string; status: number; asn: number }>;
-    sessions.sort((a, b) => a.asn - b.asn);
+    // Sort by ASN so each ASN's sessions are grouped together, then by node name.
+    sessions.sort((a, b) => a.asn - b.asn || (a.routerName || a.router).localeCompare(b.routerName || b.router));
 
-    let text = `📋 *All Sessions 所有会话* (${sessions.length})\n\n`;
+    const asnCount = new Set(sessions.map((s) => s.asn)).size;
+    const totalPages = Math.max(1, Math.ceil(sessions.length / ALL_SESSIONS_PAGE));
+    const p = Math.min(Math.max(page, 0), totalPages - 1);
+    const pageItems = sessions.slice(p * ALL_SESSIONS_PAGE, p * ALL_SESSIONS_PAGE + ALL_SESSIONS_PAGE);
+
+    const text =
+        `📋 *All Sessions 所有会话*\n` +
+        `${sessions.length} sessions · ${asnCount} ASNs · 第 ${p + 1}/${totalPages} 页`;
+
     const kb = new InlineKeyboard();
-    const shown = sessions.slice(0, 90); // Telegram inline-button ceiling
-    for (const s of shown) {
-        kb.text(`${peerDot(s.status)} AS${s.asn} · ${s.routerName || s.router}`, `peer:v:${s.uuid}`).row();
+    // Group visually: the first row of each ASN shows the ASN; its other sessions
+    // are indented under it.
+    let lastAsn = -1;
+    for (const s of pageItems) {
+        const node = s.routerName || s.router;
+        const label = s.asn !== lastAsn
+            ? `AS${s.asn} · ${peerDot(s.status)} ${node}`
+            : `      ${peerDot(s.status)} ${node}`;
+        lastAsn = s.asn;
+        kb.text(label, `peer:v:${s.uuid}`).row();
     }
-    if (sessions.length > shown.length) text += `_(showing first ${shown.length})_\n`;
+    if (totalPages > 1) {
+        if (p > 0) kb.text('◀️ 上一页', `peer:all:${p - 1}`);
+        kb.text(`${p + 1}/${totalPages}`, 'peer:all:noop');
+        if (p < totalPages - 1) kb.text('下一页 ▶️', `peer:all:${p + 1}`);
+        kb.row();
+    }
     kb.text('🔙 Panel 面板', 'peer:panel');
     if (editId) {
         try { await ctx.api.editMessageText(ctx.chat!.id, editId, text, { parse_mode: 'Markdown', reply_markup: kb }); }
@@ -498,11 +521,15 @@ export function registerPeerCommands(bot: Bot<BotContext>) {
         await ctx.answerCallbackQuery();
         await showAdminPeerPanel(ctx, ctx.callbackQuery.message?.message_id);
     });
-    bot.callbackQuery('peer:all', async (ctx) => {
+    // peer:all (page 0) and peer:all:<page> (pagination nav).
+    bot.callbackQuery(/^peer:all(?::(\d+))?$/, async (ctx) => {
         if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
         await ctx.answerCallbackQuery();
-        await showAllSessions(ctx, ctx.callbackQuery.message?.message_id);
+        const page = ctx.match?.[1] ? parseInt(ctx.match[1], 10) : 0;
+        await showAllSessions(ctx, ctx.callbackQuery.message?.message_id, page);
     });
+    // Page-indicator button — no-op (just clears the loading spinner).
+    bot.callbackQuery('peer:all:noop', async (ctx) => { await ctx.answerCallbackQuery(); });
     bot.callbackQuery('peer:byasn', async (ctx) => {
         if (!isAdmin(ctx)) { await ctx.answerCallbackQuery('❌ Admin only'); return; }
         ctx.session.peerAsnPrompt = 'view';

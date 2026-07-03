@@ -20,6 +20,7 @@ import { getRanking, getAsnInfo, getNetworkStats } from '../services/iedonApi';
 import type { RankingEntry } from '../services/iedonApi';
 import { normalizeAsn, isAsnInput } from './peer/validators';
 import { PeeringStatus } from '../peeringStatus';
+import { escapeMarkdown } from '../markdown';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -44,7 +45,7 @@ function formatRankPage(ranking: RankingEntry[], page: number): string {
         else if (item.rank === 2) medal = '🥈 ';
         else if (item.rank === 3) medal = '🥉 ';
 
-        const name = item.name.length > 16 ? `${item.name.slice(0, 16)}…` : item.name;
+        const name = escapeMarkdown(item.name.length > 16 ? `${item.name.slice(0, 16)}…` : item.name);
         const highlight = item.asn === LOCAL_ASN ? ' ⭐' : '';
         lines.push(`${medal}\`${String(item.rank).padStart(3)}\` AS${item.asn} | ${name} | ${item.index}${highlight}`);
     }
@@ -212,7 +213,8 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
                     return;
                 }
 
-                const sessions = (result.data?.sessions ?? []).slice(0, 30);
+                const allSessions = result.data?.sessions ?? [];
+                const sessions = allSessions.slice(0, 30);
 
                 if (sessions.length === 0) {
                     await ctx.reply('📋 No peers in system.\n系统中没有 Peer');
@@ -222,9 +224,11 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
                 let message = `📋 *All Peers (Admin View)*\n所有 Peer（管理员视图）\n\n`;
                 for (const s of sessions) {
                     const statusIcon = s.status === PeeringStatus.ENABLED ? '✅' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '❌';
-                    message += `${statusIcon} \`AS${s.asn}\` @ ${s.router}\n`;
+                    message += `${statusIcon} \`AS${s.asn}\` @ ${escapeMarkdown(s.router)}\n`;
                 }
-                message += `\n_共 ${sessions.length} 个 Peer_`;
+                message += allSessions.length > sessions.length
+                    ? `\n_共 ${allSessions.length} 个 Peer（显示前 ${sessions.length}）_`
+                    : `\n_共 ${allSessions.length} 个 Peer_`;
 
                 await ctx.reply(message, { parse_mode: 'Markdown' });
             } else {
@@ -253,7 +257,7 @@ export function registerStatsCommands(bot: Bot<BotContext>) {
                 let message = `👥 *Your Peers (${sessions.length})*\n\n`;
                 sessions.forEach((s: { status: number; routerName?: string; router: string }, i: number) => {
                     const statusIcon = s.status === PeeringStatus.ENABLED ? '🟢' : s.status === PeeringStatus.PENDING_REVIEW ? '⏳' : '🔴';
-                    message += `${i + 1}. ${statusIcon} ${s.routerName || s.router}\n`;
+                    message += `${i + 1}. ${statusIcon} ${escapeMarkdown(s.routerName || s.router)}\n`;
                 });
 
                 await ctx.reply(message, { parse_mode: 'Markdown' });
@@ -283,7 +287,7 @@ async function showAsnStats(ctx: BotContext, asn: number) {
 
         const message =
             `📊 *AS${asn} Statistics*\n\n` +
-            `📛 Name: ${info.name}\n` +
+            `📛 Name: ${escapeMarkdown(info.name)}\n` +
             `👥 Peers: ${info.peerCount}\n` +
             `📈 Centrality: ${info.centrality}\n` +
             `📍 Closeness: ${info.closeness}\n` +
@@ -314,7 +318,7 @@ async function showIedonPeerList(ctx: BotContext, asn: number) {
 
         const message =
             `👥 *AS${asn} Peer List*\n` +
-            `${info.name} — ${info.peerCount} peers\n\n` +
+            `${escapeMarkdown(info.name)} — ${info.peerCount} peers\n\n` +
             `${peerList}\n\n` +
             (info.peers.length > 20 ? `_…and ${info.peers.length - 20} more_\n\n` : '') +
             `_Source: iedon MAP_`;
