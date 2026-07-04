@@ -485,29 +485,30 @@ export function registerToolsCommands(bot: Bot<BotContext>) {
      */
     bot.command('dig', async (ctx) => {
         const args = ctx.match?.trim().split(/\s+/) || [];
-        const domain = sanitizeCommandArg(args[0] || '');
+        const domain = args[0] || '';
         const recordType = args[1]?.toUpperCase() || 'A';
 
         if (!domain) {
-            await ctx.reply('用法: /dig <域名> [类型]\n例如: /dig moenet.dn42 AAAA\n（不允许 - 开头的参数）');
+            await ctx.reply('用法: /dig <域名> [类型] [节点]\n例如: /dig moenet.dn42 AAAA');
             return;
         }
 
-        const validTypes = ['A', 'AAAA', 'MX', 'TXT', 'CNAME', 'NS', 'SOA', 'PTR'];
+        const validTypes = ['A', 'AAAA', 'MX', 'TXT', 'CNAME', 'NS', 'SOA', 'PTR', 'SRV', 'CAA'];
         if (!validTypes.includes(recordType)) {
             await ctx.reply(`❌ 不支持的记录类型: ${recordType}\n支持: ${validTypes.join(', ')}`);
             return;
         }
 
-        // Query DN42 DNS using spawn (runLocalCommand rejects multi-arg targets)
-        const result = await runSpawnCommand(['dig', '@172.20.0.53', domain, recordType, '+short']);
+        // Run on an agent — agents are on DN42 and can reach the resolver
+        // (172.20.0.53); the CP/bot cannot. Default to the first node; an optional
+        // 3rd arg picks a specific one.
+        const nodes = await getNodes();
+        const node = args[2] && nodes.has(args[2]) ? args[2] : (Array.from(nodes.keys())[0] || 'all');
+
+        const result = await executeOnAgent('dig', `${domain} ${recordType}`, node);
 
         await ctx.reply(
-            `🔍 *DNS Query*\n\n` +
-            `Domain: \`${codeSafe(domain)}\`\n` +
-            `Type: \`${recordType}\`\n` +
-            `Server: \`anycast.baka.dn42\`\n\n` +
-            `\`\`\`\n${codeSafe(result || 'No records found')}\n\`\`\``,
+            `🔍 *DNS Query* — \`${codeSafe(domain)}\` ${recordType}\n\n${result}`,
             { parse_mode: 'Markdown' }
         );
     });
