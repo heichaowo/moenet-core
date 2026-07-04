@@ -73,6 +73,7 @@ export const START_COMMANDS = `📋 *Commands 指令列表*
 🔗 *Peering 连接*
 /peer — 我的连接总入口 · 新建 / 改 / 删 / 状态 / 重启
         My peers — one entry, everything inline (tap the buttons)
+/node — Browse nodes 浏览节点
 
 ━━━━━━━━━━━━━━━━
 🛠️ *Tools 工具*
@@ -80,6 +81,7 @@ export const START_COMMANDS = `📋 *Commands 指令列表*
 /tcping — TCP ping test TCP 测试
 /trace — Traceroute 路由追踪
 /route — Route lookup 路由查询
+/lg — Looking glass 综合查询
 /path — AS path query AS 路径
 /whois — WHOIS lookup 信息查询
 /dig — DNS lookup DNS 查询
@@ -89,7 +91,7 @@ export const START_COMMANDS = `📋 *Commands 指令列表*
 📊 *Statistics 统计*
 /rank — Global ranking 排行榜
 /stats — Network / ASN stats 网络统计
-/community — BGP communities 社区标记
+/community — Node route stats 节点路由统计
 /flaps — Route flap history 路由抖动`;
 
 // ==============================================================================
