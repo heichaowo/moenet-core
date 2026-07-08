@@ -4,6 +4,7 @@ import type { BotContext } from '../index';
 import config from '../config';
 import { getNodes, getAgentEndpoint } from '../providers/nodes';
 import { escapeMarkdown } from '../markdown';
+import type { components as AgentApi } from '../generated/agent-api';
 
 const ERROR_NOT_LOGGED_IN = '❌ Please /login first\n请先登录';
 
@@ -256,11 +257,9 @@ export async function showLatencyStats(ctx: BotContext, asn: number, node: strin
 }
 
 // Type definitions
-interface CommunityStats {
-    latency_distribution: Record<number, number>;
-    region_distribution: Record<string, number>;
-    total_routes: number;
-}
+// Bound to the contract (contract/agent-api.openapi.yaml) so the bot's view of
+// /community stays in lockstep with what the agent actually serves.
+type CommunityStats = AgentApi['schemas']['CommunityStats'];
 
 interface ProbeStats {
     last_rtt?: number;

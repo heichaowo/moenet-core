@@ -10,6 +10,7 @@ import {
 	SessionPolicy,
 } from "../db/models/bgpSessions";
 import { getRedis } from "../db/redisContext";
+import type { components as AgentContract } from "../generated/cp-agent-api";
 import { isChinaIP } from "../providers/chinaIp";
 import {
 	computeLoopbackIPv4,
@@ -1027,22 +1028,26 @@ async function handleBirdConfig(
 			regionCommunity: getRegionCommunity(regionCode),
 			bandwidthCommunity: getBandwidthCommunity(bandwidth),
 		},
+		// `satisfies` binds this to the contract (contract/cp-agent-api.openapi.yaml
+		// → generated type). dn42As is typed `string` there, so the String()
+		// conversion is enforced at compile time — reverting to the raw BIGINT
+		// (number/unknown) value is now a tsc error, not a silent fleet-wide break.
 		policy: {
-			// dn42As is a BIGINT column (number in JS), but the agent's BirdPolicy
-			// struct declares dn42As as a string (it's only interpolated into BIRD
-			// templates). Send it as a string so JSON decoding on the agent succeeds.
 			dn42As: String(policyData.dn42As),
-			dn42Ipv4Prefix: policyData.dn42Ipv4Prefix,
-			dn42Ipv6Prefix: policyData.dn42Ipv6Prefix,
-			rpkiServers: policyData.rpkiServers,
-			ebgpImportLimit: policyData.ebgpImportLimit,
-			ebgpExportLimit: policyData.ebgpExportLimit,
-			ibgpImportLimit: policyData.ibgpImportLimit,
-			ibgpExportLimit: policyData.ibgpExportLimit,
-			asPathMaxLen: policyData.asPathMaxLen,
-			communities: policyData.communities,
-			largeCommunities: policyData.largeCommunities,
-		},
+			dn42Ipv4Prefix: policyData.dn42Ipv4Prefix as string,
+			dn42Ipv6Prefix: policyData.dn42Ipv6Prefix as string,
+			rpkiServers: policyData.rpkiServers as BirdPolicyContract["rpkiServers"],
+			ebgpImportLimit: policyData.ebgpImportLimit as number,
+			ebgpExportLimit: policyData.ebgpExportLimit as number,
+			ibgpImportLimit: policyData.ibgpImportLimit as number,
+			ibgpExportLimit: policyData.ibgpExportLimit as number,
+			asPathMaxLen: policyData.asPathMaxLen as number,
+			communities: policyData.communities as BirdPolicyContract["communities"],
+			largeCommunities:
+				policyData.largeCommunities as BirdPolicyContract["largeCommunities"],
+		} satisfies BirdPolicyContract,
 		ibgpPeers,
 	});
 }
+
+type BirdPolicyContract = AgentContract["schemas"]["BirdPolicy"];
