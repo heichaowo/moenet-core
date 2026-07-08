@@ -45,16 +45,18 @@ Then replace the hand-written `ToolResponse`, `BirdPolicy`, `CommunityStats`,
 
 ## Keeping the two repos in sync (until we monorepo)
 
-The spec lives here (the CP is the hub). The agent repo consumes the **same
-files** — pick one:
+The specs live here (the CP is the hub); this branch (`dev`) is the source of
+truth. **This is now automated** via the vendored-copy + drift-check approach:
 
-1. **Vendored copy + drift check (simplest):** copy `contract/*.yaml` into
-   `moenet-agent/contract/` and add a CI step that fails if they differ from a
-   pinned upstream (e.g. `curl` the raw file and `diff`).
-2. **git submodule** of a small `moenet-contract` repo referenced by both.
+- `moenet-agent` vendors copies under its own `contract/` and codegens Go types
+  from them (`go generate ./internal/apicontract/`).
+- Its **Contract sync** CI job fails if those copies differ from
+  `moenet-core@dev` here, or if the generated types are stale.
+- To re-sync after changing a spec here: run `scripts/sync-contract.sh` in
+  `moenet-agent` (re-fetches the specs + regenerates) and commit.
 
 When core + agent become a monorepo, `contract/` moves to the repo root and both
-subtrees codegen from it directly — no sync needed.
+subtrees codegen from it directly — no vendoring, no drift check needed.
 
 ## Validate the spec
 
