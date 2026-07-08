@@ -245,7 +245,7 @@ export interface components {
     };
     responses: {
         /** @description OK */
-        Tool: {
+        ToolResp: {
             headers: {
                 [name: string]: unknown;
             };
@@ -265,7 +265,7 @@ export interface components {
     };
     parameters: never;
     requestBodies: {
-        Tool: {
+        ToolReq: {
             content: {
                 "application/json": components["schemas"]["ToolRequest"];
             };
@@ -283,9 +283,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["Tool"];
+        requestBody: components["requestBodies"]["ToolReq"];
         responses: {
-            200: components["responses"]["Tool"];
+            200: components["responses"]["ToolResp"];
             401: components["responses"]["Err"];
         };
     };
@@ -296,9 +296,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["Tool"];
+        requestBody: components["requestBodies"]["ToolReq"];
         responses: {
-            200: components["responses"]["Tool"];
+            200: components["responses"]["ToolResp"];
             401: components["responses"]["Err"];
         };
     };
@@ -309,9 +309,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["Tool"];
+        requestBody: components["requestBodies"]["ToolReq"];
         responses: {
-            200: components["responses"]["Tool"];
+            200: components["responses"]["ToolResp"];
             401: components["responses"]["Err"];
         };
     };
@@ -322,9 +322,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["Tool"];
+        requestBody: components["requestBodies"]["ToolReq"];
         responses: {
-            200: components["responses"]["Tool"];
+            200: components["responses"]["ToolResp"];
             401: components["responses"]["Err"];
         };
     };
@@ -335,9 +335,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["Tool"];
+        requestBody: components["requestBodies"]["ToolReq"];
         responses: {
-            200: components["responses"]["Tool"];
+            200: components["responses"]["ToolResp"];
             401: components["responses"]["Err"];
         };
     };
@@ -348,9 +348,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: components["requestBodies"]["Tool"];
+        requestBody: components["requestBodies"]["ToolReq"];
         responses: {
-            200: components["responses"]["Tool"];
+            200: components["responses"]["ToolResp"];
             401: components["responses"]["Err"];
         };
     };
