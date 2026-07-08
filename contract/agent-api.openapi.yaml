@@ -110,13 +110,13 @@ components:
           type: object
           additionalProperties: { type: integer }
   requestBodies:
-    Tool:
+    ToolReq:
       required: true
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ToolRequest' }
   responses:
-    Tool:
+    ToolResp:
       description: OK
       content:
         application/json:
@@ -131,17 +131,17 @@ security:
   - agentToken: []
 
 paths:
-  /ping:   { post: { operationId: ping,   summary: ICMP ping,          requestBody: { $ref: '#/components/requestBodies/Tool' }, responses: { '200': { $ref: '#/components/responses/Tool' }, '401': { $ref: '#/components/responses/Err' } } } }
-  /tcping: { post: { operationId: tcping, summary: TCP connect test,   requestBody: { $ref: '#/components/requestBodies/Tool' }, responses: { '200': { $ref: '#/components/responses/Tool' }, '401': { $ref: '#/components/responses/Err' } } } }
-  /trace:  { post: { operationId: trace,  summary: Traceroute,         requestBody: { $ref: '#/components/requestBodies/Tool' }, responses: { '200': { $ref: '#/components/responses/Tool' }, '401': { $ref: '#/components/responses/Err' } } } }
-  /route:  { post: { operationId: route,  summary: BIRD route lookup,  requestBody: { $ref: '#/components/requestBodies/Tool' }, responses: { '200': { $ref: '#/components/responses/Tool' }, '401': { $ref: '#/components/responses/Err' } } } }
-  /path:   { post: { operationId: path,   summary: BIRD AS-path lookup, requestBody: { $ref: '#/components/requestBodies/Tool' }, responses: { '200': { $ref: '#/components/responses/Tool' }, '401': { $ref: '#/components/responses/Err' } } } }
+  /ping:   { post: { operationId: ping,   summary: ICMP ping,          requestBody: { $ref: '#/components/requestBodies/ToolReq' }, responses: { '200': { $ref: '#/components/responses/ToolResp' }, '401': { $ref: '#/components/responses/Err' } } } }
+  /tcping: { post: { operationId: tcping, summary: TCP connect test,   requestBody: { $ref: '#/components/requestBodies/ToolReq' }, responses: { '200': { $ref: '#/components/responses/ToolResp' }, '401': { $ref: '#/components/responses/Err' } } } }
+  /trace:  { post: { operationId: trace,  summary: Traceroute,         requestBody: { $ref: '#/components/requestBodies/ToolReq' }, responses: { '200': { $ref: '#/components/responses/ToolResp' }, '401': { $ref: '#/components/responses/Err' } } } }
+  /route:  { post: { operationId: route,  summary: BIRD route lookup,  requestBody: { $ref: '#/components/requestBodies/ToolReq' }, responses: { '200': { $ref: '#/components/responses/ToolResp' }, '401': { $ref: '#/components/responses/Err' } } } }
+  /path:   { post: { operationId: path,   summary: BIRD AS-path lookup, requestBody: { $ref: '#/components/requestBodies/ToolReq' }, responses: { '200': { $ref: '#/components/responses/ToolResp' }, '401': { $ref: '#/components/responses/Err' } } } }
   /dig:
     post:
       operationId: dig
       summary: DNS lookup against the DN42 resolver (target = "<domain> [type]")
-      requestBody: { $ref: '#/components/requestBodies/Tool' }
-      responses: { '200': { $ref: '#/components/responses/Tool' }, '401': { $ref: '#/components/responses/Err' } }
+      requestBody: { $ref: '#/components/requestBodies/ToolReq' }
+      responses: { '200': { $ref: '#/components/responses/ToolResp' }, '401': { $ref: '#/components/responses/Err' } }
   /community:
     get:
       operationId: community
