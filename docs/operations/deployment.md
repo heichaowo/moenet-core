@@ -56,6 +56,39 @@ git pull origin main
 docker compose up -d --build
 ```
 
+## Server-local Compose override
+
+The control plane keeps a `docker-compose.override.yml` — and the
+`traefik-tls.yml` it mounts — alongside this repo's `docker-compose.yml`.
+Neither file is part of moenet-core: they adapt the shared Traefik instance to
+unrelated services co-hosted on that machine. Both are gitignored, and are
+host state rather than repo state.
+
+Two consequences are invisible from this repo alone.
+
+**Traefik's production flags come entirely from the override.** In Compose,
+`command:` is a single-value option — an override *replaces* it rather than
+appending to it. The `command:` block on the `traefik` service in
+`docker-compose.yml` is therefore **dead on the control plane**: editing it
+changes nothing in production. Any flag added here must be mirrored into the
+server's override by hand, or it silently fails to apply. This duplication is
+forced, not accidental: Traefik's static configuration sources (file,
+command-line, environment) are mutually exclusive, so an override cannot merge
+in a few extra flags via `environment:` — it has to restate the whole command.
+
+::: danger Never deploy with an explicit `-f docker-compose.yml`
+Compose auto-discovers `docker-compose.override.yml` **only when no `-f` is
+given**. Passing `-f` silently drops the override: Traefik comes back up
+without its file provider and without the extra certificate mounts, and
+nothing is printed to say so.
+
+Use a bare `docker compose up -d`, or name both files explicitly:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+```
+:::
+
 ## CI/CD
 
 Push to `main` triggers:
