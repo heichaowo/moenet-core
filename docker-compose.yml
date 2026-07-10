@@ -162,6 +162,11 @@ services:
       - "traefik.http.routers.prometheus.entrypoints=websecure"
       - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
       - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+      # Prometheus has no auth of its own and this router is public.
+      # PROM_BASICAUTH is mandatory (`:?`) so a missing value fails the deploy
+      # instead of publishing Prometheus unauthenticated.
+      - "traefik.http.routers.prometheus.middlewares=prom-auth"
+      - "traefik.http.middlewares.prom-auth.basicauth.users=${PROM_BASICAUTH:?set PROM_BASICAUTH in .env, see .env.example}"
 
   grafana:
     image: grafana/grafana:latest
