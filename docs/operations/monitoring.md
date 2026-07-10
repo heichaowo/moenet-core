@@ -15,18 +15,35 @@ The monitoring endpoints are internet-facing through Traefik, so they must be
 protected:
 
 - **Prometheus** has no built-in authentication. It is fronted by a Traefik
-  HTTP **basic-auth** middleware — define it on the `prometheus` service labels
-  in `docker-compose.yml`:
+  HTTP **basic-auth** middleware, already declared on the `prometheus` service
+  labels in `docker-compose.yml`. The credential itself is **not** in git — the
+  labels read it from `PROM_BASICAUTH`:
 
   ```yaml
   labels:
     - "traefik.http.routers.prometheus.middlewares=prom-auth"
-    - "traefik.http.middlewares.prom-auth.basicauth.users=admin:<htpasswd-hash>"
+    - "traefik.http.middlewares.prom-auth.basicauth.users=${PROM_BASICAUTH:?...}"
   ```
 
-  Generate the hash with `openssl passwd -apr1 '<password>'` and escape every
-  `$` as `$$` in the compose file. Recreate the container to apply:
-  `docker compose up -d prometheus`.
+  Set it in `.env`, **single-quoted, with single `$`**:
+
+  ```dotenv
+  PROM_BASICAUTH='admin:$apr1$SALT$HASH'
+  ```
+
+  Generate the hash with `openssl passwd -apr1 '<password>'` and prefix the
+  username. Recreate the container to apply: `docker compose up -d prometheus`.
+
+  ::: warning Do not double the `$` in `.env`
+  The `$$` escape applies **only** to a hash written inline in compose YAML.
+  Compose interpolates unquoted and double-quoted `.env` values, so single
+  quotes are what protect the `$` here — inside single quotes `$$` is taken
+  literally and the hash will never match. If you are migrating a hash out of a
+  compose file, **un-double** it first.
+  :::
+
+  Because the variable is declared `:?`, `docker compose up` **fails** when it
+  is unset or empty rather than starting Prometheus unauthenticated.
 
 - **Grafana** uses its own admin login — set `GRAFANA_PASSWORD` in `.env`
   (the compose no longer defaults it to `admin`).
