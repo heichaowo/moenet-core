@@ -38,3 +38,12 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 docs/.vitepress/dist
 docs/.vitepress/cache
 docs-legacy
+
+# Server-local Compose override, and the Traefik dynamic-config file it mounts.
+# Not part of moenet-core: on the control plane these adapt the shared Traefik
+# to unrelated services co-hosted on that machine. They are host state — back
+# them up with the host, not with this repo.
+# See docs/operations/deployment.md: the override changes Traefik's behaviour
+# in ways this repo cannot show.
+docker-compose.override.yml
+traefik-tls.yml
