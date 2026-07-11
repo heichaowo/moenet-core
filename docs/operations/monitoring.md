@@ -45,8 +45,24 @@ protected:
   Because the variable is declared `:?`, `docker compose up` **fails** when it
   is unset or empty rather than starting Prometheus unauthenticated.
 
-- **Grafana** uses its own admin login — set `GRAFANA_PASSWORD` in `.env`
-  (the compose no longer defaults it to `admin`).
+- **Grafana** uses its own admin login (username `admin`). The password comes
+  from `GRAFANA_PASSWORD` in `.env`. Because the variable is declared `:?` in
+  `docker-compose.yml`, `docker compose up` **fails** when it is unset or empty
+  rather than starting Grafana with Grafana's built-in `admin` default.
+
+  ::: warning `GRAFANA_PASSWORD` only applies on first start
+  Grafana reads `GF_SECURITY_ADMIN_PASSWORD` **only** when it creates the admin
+  user, i.e. on a fresh `grafana_data` volume. Once that user exists the
+  password lives in Grafana's own database and editing `.env` has no effect.
+  To change it on a running deployment:
+
+  ```bash
+  docker compose exec grafana grafana-cli admin reset-admin-password '<new-password>'
+  ```
+
+  Set `GRAFANA_PASSWORD` in `.env` to match, so a future volume rebuild
+  provisions the same credential.
+  :::
 
 - **Agent API** (the CP-facing HTTP server on each node) must be firewalled to
   the Control Plane's IP only — it authenticates with the agent API key, but

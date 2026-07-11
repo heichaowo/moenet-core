@@ -173,7 +173,10 @@ services:
     container_name: moenet-grafana
     restart: always
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      # grafana.moenet.work is a public router. GRAFANA_PASSWORD is mandatory
+      # (`:?`) so a missing or empty value fails the deploy instead of
+      # publishing Grafana with the default admin/admin credential.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env, see .env.example}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=https://grafana.moenet.work
     volumes:
