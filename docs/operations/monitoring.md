@@ -7,7 +7,7 @@
 | API | 3000 | `api.moenet.work` |
 | Bot | 8443 | `bot.moenet.work` |
 | Prometheus | 9090 | `prom.moenet.work` |
-| Grafana | 3002 | `grafana.moenet.work` |
+| Grafana | 3000 | `grafana.moenet.work` |
 
 ## Access & Authentication
 
