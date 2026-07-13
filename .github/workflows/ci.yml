@@ -74,3 +74,33 @@ jobs:
 
       - name: Run Bot tests
         run: cd packages/bot && bun test
+
+  changeset-check:
+    name: Changeset Check
+    # Skip the PRs that never carry a changeset by design: the changesets
+    # bot's own "Version Packages" PR (baseBranch is dev, so that branch is
+    # changeset-release/dev), and Dependabot bumps.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.head_ref != 'changeset-release/dev'
+      && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Fails the PR if a workspace package changed without a changeset.
+      # api and bot are a `fixed` group, so one changeset versions both.
+      # For a change that genuinely needs no release, say so explicitly:
+      # `bun run changeset add --empty`.
+      - name: Require a changeset
+        run: bunx changeset status --since=origin/${{ github.base_ref }}
