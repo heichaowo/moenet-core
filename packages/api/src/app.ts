@@ -27,7 +27,7 @@ app.use(
 );
 
 // Health check
-app.get("/health", (c) => c.json({ status: "ok", version: "1.0.0" }));
+app.get("/health", (c) => c.json({ status: "ok", version: "3.0.0" }));
 
 // Register all routes
 registerRoutes(app);
