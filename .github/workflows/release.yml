@@ -1,0 +1,87 @@
+name: Release
+
+# Changesets-driven release for moenet-core.
+#
+# Flow:
+#   1. A push to dev with pending changesets → changesets/action opens (or
+#      updates) a "Version Packages" PR on branch changeset-release/dev that
+#      bumps package.json + writes CHANGELOG.
+#   2. Merging that PR → this workflow runs again, finds no changesets, reads
+#      the new version, tags it, and builds versioned images.
+#
+# Why it calls build.yml instead of just pushing a v* tag: a tag pushed with
+# the default GITHUB_TOKEN does NOT trigger build.yml (GitHub suppresses
+# workflow runs triggered by the automatic token, to avoid recursion). So we
+# create the tag for the record AND invoke build.yml directly via workflow_call.
+
+on:
+  push:
+    branches: [dev]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # a release must never be cancelled mid-flight
+
+permissions:
+  contents: write # push the Version PR branch + create the tag
+  pull-requests: write # open/update the Version PR
+  packages: write # build.yml (called below) pushes images to GHCR
+
+jobs:
+  version:
+    name: Version PR / detect release
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.detect.outputs.released }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Changesets — open/update the Version PR
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: bun run changeset:version
+          # No `publish`: this repo ships Docker images, not npm packages.
+          # Tagging + image build happen in the detect step / build job below.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect a freshly-merged release, then tag it
+        id: detect
+        # Only when there are no pending changesets: either nothing to release,
+        # or the Version PR was just merged. hasChangesets=true means a Version
+        # PR was (re)opened this run — nothing to tag yet.
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '.version' packages/api/package.json)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "v$VERSION already tagged — nothing to release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          else
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "Tagged v$VERSION."
+          fi
+
+  build-images:
+    name: Build versioned images
+    needs: version
+    if: needs.version.outputs.released == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
