@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import pkg from "../package.json";
 import config from "./config";
 import { initDatabase } from "./db/dbContext";
 import { initRedis } from "./db/redisContext";
@@ -27,7 +28,7 @@ app.use(
 );
 
 // Health check
-app.get("/health", (c) => c.json({ status: "ok", version: "3.0.0" }));
+app.get("/health", (c) => c.json({ status: "ok", version: pkg.version }));
 
 // Register all routes
 registerRoutes(app);
