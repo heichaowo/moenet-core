@@ -15,9 +15,12 @@
     "lint": "bun run --filter '*' lint",
     "test": "bun run --filter '*' test",
     "contract:lint": "bunx @redocly/cli lint contract/agent-api.openapi.yaml contract/cp-agent-api.openapi.yaml",
-    "contract:gen": "bunx openapi-typescript contract/cp-agent-api.openapi.yaml -o packages/api/src/generated/cp-agent-api.d.ts && bunx openapi-typescript contract/agent-api.openapi.yaml -o packages/bot/src/generated/agent-api.d.ts"
+    "contract:gen": "bunx openapi-typescript contract/cp-agent-api.openapi.yaml -o packages/api/src/generated/cp-agent-api.d.ts && bunx openapi-typescript contract/agent-api.openapi.yaml -o packages/bot/src/generated/agent-api.d.ts",
+    "changeset": "changeset",
+    "changeset:version": "changeset version"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.0",
     "@types/bun": "^1.3.6",
     "typescript": "^5.9.3"
   },
