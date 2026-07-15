@@ -57,6 +57,11 @@ jobs:
           version: bun run changeset:version
           # No `publish`: this repo ships Docker images, not npm packages.
           # Tagging + image build happen in the detect step / build job below.
+          # The default "Version Packages" reads as noise in the PR list and
+          # breaks conventional-commit history; name it, and reuse the string
+          # for the squash-merge commit.
+          title: "chore(release): version packages"
+          commit: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
