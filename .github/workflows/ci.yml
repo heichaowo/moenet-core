@@ -129,6 +129,36 @@ jobs:
       - name: Run integration tests
         run: cd packages/api && bun test tests/integration
 
+  lint-bot:
+    name: Lint Bot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint Bot
+        run: cd packages/bot && bun run lint
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   changeset-check:
     name: Changeset Check
     # Skip the PRs that never carry a changeset by design: the changesets
@@ -158,3 +188,29 @@ jobs:
       # `bun run changeset add --empty`.
       - name: Require a changeset
         run: bunx changeset status --since=origin/${{ github.base_ref }}
+
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs:
+      - typecheck
+      - lint
+      - test-api
+      - test-bot
+      - test-integration
+      - changeset-check
+      - lint-bot
+      - secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "Job results: $results"
+          for result in $results; do
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "A required job did not succeed: $result"
+              exit 1
+            fi
+          done
+          echo "All jobs succeeded or were skipped."

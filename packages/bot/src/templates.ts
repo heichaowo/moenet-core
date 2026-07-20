@@ -3,7 +3,7 @@
  *
  * Centralized message templates for consistent Telegram formatting.
  * Uses Markdown V1 formatting.
- * 
+ *
  * Ported from: moenet-dn42-control-plane/src/bot/templates.py
  */
 
@@ -11,28 +11,28 @@
 // Common Elements
 // =============================================================================
 
-export const DIVIDER = '─'.repeat(20);
+export const DIVIDER = "─".repeat(20);
 
 export const ICONS = {
-    success: '✅',
-    error: '❌',
-    warning: '⚠️',
-    info: 'ℹ️',
-    peer: '🔗',
-    node: '🖥',
-    stats: '📊',
-    rank: '🏆',
-    login: '🔐',
-    logout: '👋',
-    email: '📧',
-    key: '🔑',
-    network: '🌐',
-    config: '⚙️',
-    cancel: '❌',
-    confirm: '✅',
-    pending: '⏳',
-    active: '🟢',
-    inactive: '🔴',
+	success: "✅",
+	error: "❌",
+	warning: "⚠️",
+	info: "ℹ️",
+	peer: "🔗",
+	node: "🖥",
+	stats: "📊",
+	rank: "🏆",
+	login: "🔐",
+	logout: "👋",
+	email: "📧",
+	key: "🔑",
+	network: "🌐",
+	config: "⚙️",
+	cancel: "❌",
+	confirm: "✅",
+	pending: "⏳",
+	active: "🟢",
+	inactive: "🔴",
 } as const;
 
 export type IconKey = keyof typeof ICONS;
@@ -44,16 +44,16 @@ export type IconKey = keyof typeof ICONS;
 /**
  * Create formatted header
  */
-export function header(title: string, icon: IconKey | string = ''): string {
-    const iconStr = icon ? (ICONS[icon as IconKey] ?? icon) : '';
-    return `${iconStr} *${title}*\n${DIVIDER}`;
+export function header(title: string, icon: IconKey | string = ""): string {
+	const iconStr = icon ? (ICONS[icon as IconKey] ?? icon) : "";
+	return `${iconStr} *${title}*\n${DIVIDER}`;
 }
 
 /**
  * Create subheader
  */
 export function subheader(text: string): string {
-    return `\n*${text}*`;
+	return `\n*${text}*`;
 }
 
 // =============================================================================
@@ -289,47 +289,47 @@ export const CANCELLED = `{icon} Operation cancelled.
  * Format template with icons and divider
  */
 export function formatTemplate(
-    template: string,
-    params: Record<string, string | number | undefined> & { icon?: IconKey }
+	template: string,
+	params: Record<string, string | number | undefined> & { icon?: IconKey },
 ): string {
-    const { icon = 'info', ...rest } = params;
-    let result = template
-        .replace(/{icon}/g, ICONS[icon] ?? '')
-        .replace(/{div}/g, DIVIDER);
+	const { icon = "info", ...rest } = params;
+	let result = template
+		.replace(/{icon}/g, ICONS[icon] ?? "")
+		.replace(/{div}/g, DIVIDER);
 
-    for (const [key, value] of Object.entries(rest)) {
-        if (value !== undefined) {
-            result = result.replace(new RegExp(`{${key}}`, 'g'), String(value));
-        }
-    }
+	for (const [key, value] of Object.entries(rest)) {
+		if (value !== undefined) {
+			result = result.replace(new RegExp(`{${key}}`, "g"), String(value));
+		}
+	}
 
-    return result;
+	return result;
 }
 
 /**
  * Format success message
  */
 export function success(message: string): string {
-    return `${ICONS.success} ${message}`;
+	return `${ICONS.success} ${message}`;
 }
 
 /**
  * Format error message
  */
 export function error(message: string): string {
-    return `${ICONS.error} ${message}`;
+	return `${ICONS.error} ${message}`;
 }
 
 /**
  * Format info message
  */
 export function info(message: string): string {
-    return `${ICONS.info} ${message}`;
+	return `${ICONS.info} ${message}`;
 }
 
 /**
  * Format warning message
  */
 export function warning(message: string): string {
-    return `${ICONS.warning} ${message}`;
+	return `${ICONS.warning} ${message}`;
 }

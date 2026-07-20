@@ -5,13 +5,13 @@
  * Eliminates duplicate apiRequest functions across user.ts, block.ts, stats.ts, etc.
  */
 
-import config from './config';
+import config from "./config";
 
 export interface APIResponse {
-    code: number;
-    message?: string;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    data?: Record<string, any>;
+	code: number;
+	message?: string;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	data?: Record<string, any>;
 }
 
 /**
@@ -23,26 +23,26 @@ export interface APIResponse {
  * @param token - Optional Bearer token (defaults to no auth)
  */
 export async function apiRequest(
-    endpoint: string,
-    method = 'POST',
-    body?: unknown,
-    token?: string
+	endpoint: string,
+	method = "POST",
+	body?: unknown,
+	token?: string,
 ): Promise<APIResponse> {
-    try {
-        const response = await fetch(`${config.apiUrl}${endpoint}`, {
-            method,
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': token ? `Bearer ${token}` : '',
-            },
-            body: body ? JSON.stringify(body) : undefined,
-        });
-        // await inside the try so a non-JSON body (proxy/error page, empty) is a
-        // caught rejection → normal error response, instead of escaping and
-        // crashing the calling handler (its buttons would look dead — the handler
-        // throws before answerCallbackQuery).
-        return (await response.json()) as APIResponse;
-    } catch (e) {
-        return { code: -1, message: `Request failed: ${(e as Error).message}` };
-    }
+	try {
+		const response = await fetch(`${config.apiUrl}${endpoint}`, {
+			method,
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: token ? `Bearer ${token}` : "",
+			},
+			body: body ? JSON.stringify(body) : undefined,
+		});
+		// await inside the try so a non-JSON body (proxy/error page, empty) is a
+		// caught rejection → normal error response, instead of escaping and
+		// crashing the calling handler (its buttons would look dead — the handler
+		// throws before answerCallbackQuery).
+		return (await response.json()) as APIResponse;
+	} catch (e) {
+		return { code: -1, message: `Request failed: ${(e as Error).message}` };
+	}
 }

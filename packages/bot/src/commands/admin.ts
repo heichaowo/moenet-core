@@ -5,7 +5,7 @@ import config from "../config";
 import { isAdmin } from "../guards";
 import type { BotContext } from "../index";
 import { escapeMarkdown } from "../markdown";
-import { getNodes, getAgentEndpoint } from "../providers/nodes";
+import { getAgentEndpoint, getNodes } from "../providers/nodes";
 import { fetchContacts } from "../services/dn42Registry";
 import { DIVIDER } from "../templates";
 import { calculatePort, isAsnInput, normalizeAsn } from "./peer/validators";
@@ -678,9 +678,9 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 					{ action: "enumSessions" },
 					config.apiToken,
 				);
-				const session = ((result.data?.sessions || []) as FullSessionInfo[]).find(
-					(s) => s.uuid === uuid,
-				);
+				const session = (
+					(result.data?.sessions || []) as FullSessionInfo[]
+				).find((s) => s.uuid === uuid);
 
 				if (!session) {
 					await ctx.editMessageText("❌ Session not found.\n会话未找到。");
@@ -692,11 +692,12 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 				const node = session.routerName || session.router;
 
 				const warningIcon = newStatus === 5 ? "🗑️" : "⚠️";
-				const warningText = newStatus === 5
-					? "This will delete the session configuration.\n此操作将删除会话配置。"
-					: newStatus === 1
-						? "This will disconnect the BGP session and WG tunnel.\n此操作将断开 BGP 会话和 WG 隧道。"
-						: "This is a destructive operation.\n此操作不可逆。";
+				const warningText =
+					newStatus === 5
+						? "This will delete the session configuration.\n此操作将删除会话配置。"
+						: newStatus === 1
+							? "This will disconnect the BGP session and WG tunnel.\n此操作将断开 BGP 会话和 WG 隧道。"
+							: "This is a destructive operation.\n此操作不可逆。";
 
 				const confirmMsg =
 					`${warningIcon} *Confirm Status Change 确认状态变更*\n${DIVIDER}\n\n` +
@@ -1067,7 +1068,11 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		const node = ctx.match?.[1];
 		if (!node) return;
 		try {
-			await renderHealthDetail(ctx, node, ctx.callbackQuery.message?.message_id);
+			await renderHealthDetail(
+				ctx,
+				node,
+				ctx.callbackQuery.message?.message_id,
+			);
 			await ctx.answerCallbackQuery();
 		} catch (error) {
 			console.error("[Health] Detail callback error:", error);
@@ -1756,7 +1761,6 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		return { tg: 0, email: 0, both: 0, total: 0 };
 	}
 
-
 	// Handle "Preview & Send" from main menu
 	bot.callbackQuery("ann:preview", async (ctx) => {
 		if (!isAdmin(ctx)) {
@@ -1932,11 +1936,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			}
 		}
 
-		const sendResults = await executeSend(
-			ctx,
-			flow.message || "",
-			targets,
-		);
+		const sendResults = await executeSend(ctx, flow.message || "", targets);
 		await showSendReport(ctx, sendResults, flow);
 	});
 
@@ -1968,8 +1968,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		const retryTargets: AnnounceTarget[] = failedResults.map((r) => ({
 			asn: r.asn,
 			telegramId: r.tg === "failed" ? r.telegramId : undefined,
-			emails:
-				r.email === "failed" && r.emailAddr ? [r.emailAddr] : [],
+			emails: r.email === "failed" && r.emailAddr ? [r.emailAddr] : [],
 		}));
 
 		const sendResults = await executeSend(
@@ -2015,19 +2014,18 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 					);
 					result.tg = "sent";
 				} catch (error) {
-					console.error(
-						`[Announce] TG failed AS${target.asn}:`,
-						error,
-					);
+					console.error(`[Announce] TG failed AS${target.asn}:`, error);
 					result.tg = "failed";
 				}
 				tgProgress++;
 
 				// Progress update every 10 messages
 				if (tgProgress % 10 === 0 && tgProgress < totalTg) {
-					ctx.editMessageText(
-						`⏳ Sending... 📱 TG ${tgProgress}/${totalTg}\n正在发送...`,
-					).catch(() => {});
+					ctx
+						.editMessageText(
+							`⏳ Sending... 📱 TG ${tgProgress}/${totalTg}\n正在发送...`,
+						)
+						.catch(() => {});
 				}
 			}
 
@@ -2054,9 +2052,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			const emailData = emailResult.data as any;
 			const failedAsnSet = new Set(
-				((emailData?.errors || []) as Array<{ asn: number }>).map(
-					(e) => e.asn,
-				),
+				((emailData?.errors || []) as Array<{ asn: number }>).map((e) => e.asn),
 			);
 
 			for (const r of results) {
@@ -2083,12 +2079,8 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			: "📢 *Announcement Report 公告报告*";
 
 		// Categorize by user reach status
-		const bothOk = results.filter(
-			(r) => r.tg === "sent" && r.email === "sent",
-		);
-		const tgOnly = results.filter(
-			(r) => r.tg === "sent" && r.email !== "sent",
-		);
+		const bothOk = results.filter((r) => r.tg === "sent" && r.email === "sent");
+		const tgOnly = results.filter((r) => r.tg === "sent" && r.email !== "sent");
 		const emailOnly = results.filter(
 			(r) => r.email === "sent" && r.tg !== "sent",
 		);
@@ -2097,9 +2089,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 		);
 		const reached = results.length - unreachable.length;
 		const reachPct =
-			results.length > 0
-				? Math.round((reached / results.length) * 100)
-				: 0;
+			results.length > 0 ? Math.round((reached / results.length) * 100) : 0;
 
 		const tgSent = results.filter((r) => r.tg === "sent").length;
 		const tgFailed = results.filter((r) => r.tg === "failed").length;
@@ -2122,17 +2112,9 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			report += `\n\n*❌ Unreachable 未到达:*`;
 			for (const r of unreachable.slice(0, 20)) {
 				const tgInfo =
-					r.tg === "failed"
-						? "📱❌"
-						: r.tg === "no_channel"
-							? "📱—"
-							: "";
+					r.tg === "failed" ? "📱❌" : r.tg === "no_channel" ? "📱—" : "";
 				const emailInfo =
-					r.email === "failed"
-						? "📧❌"
-						: r.email === "no_channel"
-							? "📧—"
-							: "";
+					r.email === "failed" ? "📧❌" : r.email === "no_channel" ? "📧—" : "";
 				report += `\n  • AS${r.asn} ${tgInfo} ${emailInfo}`;
 			}
 			if (unreachable.length > 20) {
@@ -2149,10 +2131,7 @@ export function registerAdminCommands(bot: Bot<BotContext>) {
 			ctx.session.announceFlow = { ...flow, failedResults: retryable };
 
 			const keyboard = new InlineKeyboard()
-				.text(
-					`🔄 Retry ${retryable.length} failed 重试失败项`,
-					"ann:retry",
-				)
+				.text(`🔄 Retry ${retryable.length} failed 重试失败项`, "ann:retry")
 				.text("✅ Done 完成", "ann:done:dismiss");
 
 			await ctx.editMessageText(report, {
@@ -2560,7 +2539,9 @@ async function notifyRejection(
 				(hasReason ? `📝 Reason 原因: ${reason}\n` : "") +
 				`\nQuestions? Contact ${config.telegramContact}.\n如有疑问请联系 ${config.telegramContact}。`;
 			try {
-				await ctx.api.sendMessage(t.telegramId, msg, { parse_mode: "Markdown" });
+				await ctx.api.sendMessage(t.telegramId, msg, {
+					parse_mode: "Markdown",
+				});
 				tg = true;
 			} catch (e) {
 				console.error(`[RejectNotify] TG failed AS${asn}:`, e);
@@ -3289,7 +3270,12 @@ interface FixResult {
 	node: string;
 	addresses_fixed: number;
 	bgp_restarted: number;
-	details?: Array<{ asn: number; interface: string; action: string; result: string }>;
+	details?: Array<{
+		asn: number;
+		interface: string;
+		action: string;
+		result: string;
+	}>;
 }
 
 /**
@@ -3306,7 +3292,7 @@ async function fetchNodeHealth(nodeName: string): Promise<HealthData | null> {
 		const response = await fetch(`${endpoint}/health/sessions`, {
 			method: "GET",
 			headers: {
-				"Authorization": `Bearer ${config.agentToken || ""}`,
+				Authorization: `Bearer ${config.agentToken || ""}`,
 			},
 			signal: controller.signal,
 		});
@@ -3335,7 +3321,7 @@ async function fetchHealthFix(nodeName: string): Promise<FixResult | null> {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				"Authorization": `Bearer ${config.agentToken || ""}`,
+				Authorization: `Bearer ${config.agentToken || ""}`,
 			},
 			signal: controller.signal,
 		});

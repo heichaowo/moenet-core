@@ -8,9 +8,9 @@
  * hang the notification.
  */
 
-import { lookupWhois, getWhoisAttr } from "../../services/dn42Registry";
-import { validateIpOwnership, isLinkLocal } from "../../services/dn42Validator";
 import { isChinaIP, resolveEndpoint } from "../../providers/chinaIp";
+import { getWhoisAttr, lookupWhois } from "../../services/dn42Registry";
+import { isLinkLocal, validateIpOwnership } from "../../services/dn42Validator";
 
 export interface ApprovalCardInput {
 	asn: number;
@@ -70,10 +70,25 @@ function isReservedIp(ip: string): boolean {
 
 /** Obvious placeholder endpoints people paste instead of their real one. */
 const PLACEHOLDER_HOSTS = new Set([
-	"example.com", "example.net", "example.org", "example.edu",
-	"localhost", "google.com", "www.google.com", "baidu.com",
-	"1.2.3.4", "1.1.1.1", "8.8.8.8", "8.8.4.4", "0.0.0.0",
-	"test.com", "test", "invalid", "changeme", "your.endpoint", "endpoint",
+	"example.com",
+	"example.net",
+	"example.org",
+	"example.edu",
+	"localhost",
+	"google.com",
+	"www.google.com",
+	"baidu.com",
+	"1.2.3.4",
+	"1.1.1.1",
+	"8.8.8.8",
+	"8.8.4.4",
+	"0.0.0.0",
+	"test.com",
+	"test",
+	"invalid",
+	"changeme",
+	"your.endpoint",
+	"endpoint",
 ]);
 
 /** Reason string if the endpoint is obviously not a real clearnet WG endpoint
