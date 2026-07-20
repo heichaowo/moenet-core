@@ -75,6 +75,60 @@ jobs:
       - name: Run Bot tests
         run: cd packages/bot && bun test
 
+  test-integration:
+    name: Test Integration (real PG/Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: moenet
+          POSTGRES_PASSWORD: moenet_test
+          POSTGRES_DB: moenet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U moenet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: moenet
+      DB_USER: moenet
+      DB_PASSWORD: moenet_test
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      NODE_ENV: test
+      INTEGRATION: "1"
+      AGENT_API_KEY: test-key
+      JWT_SECRET: test-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Runs in its OWN invocation (not the unit `bun test`): the unit tests
+      # mock.module dbContext, and Bun's module mocks are process-global.
+      - name: Run integration tests
+        run: cd packages/api && bun test tests/integration
+
   changeset-check:
     name: Changeset Check
     # Skip the PRs that never carry a changeset by design: the changesets
