@@ -158,3 +158,43 @@ jobs:
       # `bun run changeset add --empty`.
       - name: Require a changeset
         run: bunx changeset status --since=origin/${{ github.base_ref }}
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans full history
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  ci-ok:
+    name: CI OK
+    # Single required check for branch protection: adding/removing jobs or
+    # having a job legitimately skip won't break the ruleset — only a real
+    # failure/cancellation does.
+    if: always()
+    needs:
+      - typecheck
+      - lint
+      - test-api
+      - test-bot
+      - test-integration
+      - changeset-check
+      - secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "job results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::a required job did not pass: $r"
+              exit 1
+            fi
+          done
